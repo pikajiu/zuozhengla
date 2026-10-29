@@ -185,7 +185,7 @@ const store = {
   get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
-base = store.get("posture.base.v2", null);
+base = store.get("posture.base.v3", null);
 for (const id of ["level", "hold", "sound", "view", "model", "debug"]) {
   const v = store.get("posture." + id, null);
   if (v) $(id).value = v;
@@ -277,8 +277,8 @@ $("calBtn").addEventListener("click", () => {
       const vs = ok.map((s) => s[k]).filter((v) => v != null).sort((a, b) => a - b);
       return vs.length ? vs[Math.floor(vs.length / 2)] : null;
     };
-    base = { headHeight: median("headHeight"), neckAngle: median("neckAngle"), tilt: median("tilt"), mode: ok[0].mode };
-    store.set("posture.base.v2", base);
+    base = { headHeight: median("headHeight"), neckAngle: median("neckAngle"), tilt: median("tilt"), yaw: median("yaw"), mode: ok[0].mode };
+    store.set("posture.base.v3", base);
     smoothed = null;
     showTip("记住了！之后会和这个坐姿比较", 2500);
   }, 200);
@@ -316,9 +316,10 @@ function showDebug(m, ev) {
   const f = (v, d = 1) => (v == null ? "-" : v.toFixed(d));
   const lines = m
     ? [`模式 ${m.mode}`, `头高 ${f(m.headHeight, 3)}  基准 ${f(base?.headHeight, 3)}`,
-       `颈角 ${f(m.neckAngle)}°  基准 ${f(base?.neckAngle)}°`, `肩斜 ${f(m.tilt)}°  基准 ${f(base?.tilt)}°`]
+       `颈角 ${f(m.neckAngle)}°  基准 ${f(base?.neckAngle)}°`, `肩斜 ${f(m.tilt)}°  基准 ${f(base?.tilt)}°`, `转头 ${f(m.yaw)}°  基准 ${f(base?.yaw)}°`]
     : ["没识别到头和肩"];
-  if (ev.detail) lines.push(`下降 ${f(ev.detail.drop * 100, 0)}%  颈差 ${f(ev.detail.neck)}°  肩差 ${f(ev.detail.tilt)}°`);
+  if (ev.detail?.drop != null) lines.push(`下降 ${f(ev.detail.drop * 100, 0)}%  颈差 ${f(ev.detail.neck)}°  肩差 ${f(ev.detail.tilt)}°`);
+  if (ev.detail?.turn != null) lines.push(`转头差 ${f(ev.detail.turn)}°（超过 30° 暂停判断）`);
   box.textContent = lines.join("\n");
 }
 
@@ -348,7 +349,7 @@ function draw(lm, status) {
 function update(ev, now) {
   const dt = Math.min(1, (now - session.last) / 1000);
   session.last = now;
-  const label = { good: "坐得很好", warn: "注意坐姿", bad: ev.issues[0] || "坐直一点", none: "没看到头和肩膀", need_cal: "请先记住正确坐姿" }[ev.status];
+  const label = { good: "坐得很好", warn: "注意坐姿", bad: ev.issues[0] || "坐直一点", none: "没看到头和肩膀", need_cal: "请先记住正确坐姿", turned: "头转开了，暂不判断" }[ev.status];
   pill.textContent = label;
   pill.className = "pill " + (["good", "warn", "bad"].includes(ev.status) ? ev.status : "");
 

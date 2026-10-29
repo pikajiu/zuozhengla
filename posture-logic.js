@@ -39,9 +39,22 @@ export function measure(lm, world, w = 1, h = 1) {
     ? (i) => world[i]
     : (i) => ({ x: lm[i].x * w, y: lm[i].y * h, z: 0 });
 
-  const head = avg(HEAD.map(P));
+  // 头的位置取两耳中点：转头时耳朵中点基本不动，鼻子却会大幅前后左右移动，容易被当成低头
+  const le = P(L_EAR), re = P(R_EAR);
+  const head = avg([le, re]);
   const ls = P(L_SH), rs = P(R_SH);
   const shoulder = avg([ls, rs]);
+
+  // 转头角度：两耳连线和两肩连线在水平面上的夹角（只有 3D 坐标能算）
+  let yaw = null;
+  if (use3d) {
+    const a1 = Math.atan2(le.z - re.z, le.x - re.x);
+    const a2 = Math.atan2(ls.z - rs.z, ls.x - rs.x);
+    let d = toDeg(a1 - a2);
+    while (d > 180) d -= 360;
+    while (d < -180) d += 360;
+    yaw = d;
+  }
 
   // 图像和 MediaPipe 3D 坐标的 y 轴都是向下的
   const vx = head.x - shoulder.x, vy = head.y - shoulder.y, vz = use3d ? head.z - shoulder.z : 0;
@@ -57,7 +70,7 @@ export function measure(lm, world, w = 1, h = 1) {
     tilt = toDeg(Math.atan2(Math.abs(dy), horiz || 1e-6));
   }
 
-  return { headHeight, neckAngle, tilt, mode: use3d ? "3d" : "2d" };
+  return { headHeight, neckAngle, tilt, yaw, mode: use3d ? "3d" : "2d" };
 }
 
 // 平滑，减少抖动
@@ -65,12 +78,15 @@ export function smooth(prev, next, alpha = 0.3) {
   if (!prev) return next;
   if (!next) return prev;
   const out = { ...next };
-  for (const k of ["headHeight", "neckAngle", "tilt"]) {
+  for (const k of ["headHeight", "neckAngle", "tilt", "yaw"]) {
     const a = prev[k], b = next[k];
     out[k] = a == null || b == null ? b : a + alpha * (b - a);
   }
   return out;
 }
+
+// 头转开超过这个角度就暂停判断
+export const TURN_LIMIT = 30;
 
 // 灵敏度：数值越小越严格
 export const LEVELS = {
@@ -89,6 +105,12 @@ export function evaluate(m, base, level = "normal") {
   const issues = [];
   let warn = false;
 
+  // 头明显转向一边时（看旁边、和人说话），关键点估计不可靠，这段时间不判断坐姿
+  const turn = m.yaw != null && base.yaw != null ? Math.abs(m.yaw - base.yaw) : null;
+  if (turn != null && turn > TURN_LIMIT) {
+    return { status: "turned", issues: [], detail: { turn } };
+  }
+
   const drop = 1 - m.headHeight / base.headHeight;
   const neck = m.neckAngle - base.neckAngle;
   const tilt = m.tilt != null && base.tilt != null ? m.tilt - base.tilt : null;
@@ -102,5 +124,5 @@ export function evaluate(m, base, level = "normal") {
   if (tilt != null && tilt > t.tilt) issues.push("身子歪了，肩膀摆平");
 
   const status = issues.length ? "bad" : warn ? "warn" : "good";
-  return { status, issues, detail: { drop, neck, tilt } };
+  return { status, issues, detail: { drop, neck, tilt, turn } };
 }
