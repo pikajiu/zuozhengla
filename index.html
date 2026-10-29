@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f3f6f2">
+<title>坐正啦</title>
+<style>
+/* 布局：单屏工具，上方是摄像头画面和状态，下方是操作和报告 */
+:root{
+  --bg:#f3f6f2; --surface:#ffffff; --ink:#1d2a24; --muted:#5f6f67; --line:#dbe3dd;
+  --accent:#2f6f5e; --good:#2e8b57; --warn:#c98a12; --bad:#d0463b; --star:#e7a51b;
+  --font:"PingFang SC","HarmonyOS Sans SC","MiSans","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;
+  --num:ui-rounded,"SF Pro Rounded","PingFang SC",system-ui,sans-serif;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#121815; --surface:#1b231f; --ink:#e7efe9; --muted:#9db0a6; --line:#2c3832;
+  --accent:#7cc2ad; --good:#4fbf83; --warn:#e3a93a; --bad:#ef6b5f; --star:#f2bd3c; color-scheme:dark}}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font:15px/1.55 var(--font);
+  padding:env(safe-area-inset-top,0) max(16px,env(safe-area-inset-right,0px)) env(safe-area-inset-bottom,0) max(16px,env(safe-area-inset-left,0px))}
+main{max-width:560px;margin:0 auto;padding-block:14px 32px;display:flex;flex-direction:column;gap:14px}
+header{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+h1{font-size:22px;margin:0;letter-spacing:.02em}
+.sub{color:var(--muted);font-size:13px}
+.stage{position:relative;border-radius:18px;overflow:hidden;background:#0d1411;aspect-ratio:3/4;max-width:100%}
+.stage video,.stage canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.stage video.mirror,.stage canvas.mirror{transform:scaleX(-1)}
+.stage.hide-video video{opacity:0}
+.badge{position:absolute;left:12px;right:12px;top:12px;display:flex;justify-content:space-between;align-items:flex-start;gap:8px;pointer-events:none}
+.pill{padding:8px 14px;border-radius:999px;font-weight:600;font-size:16px;color:#fff;background:rgba(0,0,0,.45);backdrop-filter:blur(6px)}
+.pill.good{background:var(--good)} .pill.warn{background:var(--warn)} .pill.bad{background:var(--bad)}
+.stars{padding:6px 12px;border-radius:999px;background:rgba(0,0,0,.45);color:#fff;font:600 16px var(--num);font-variant-numeric:tabular-nums}
+.stars b{color:var(--star)}
+.tip{position:absolute;left:12px;right:12px;bottom:12px;padding:10px 12px;border-radius:12px;background:rgba(0,0,0,.55);color:#fff;font-size:14px}
+.flash{position:absolute;inset:0;border:8px solid var(--bad);border-radius:18px;opacity:0;transition:opacity .2s;pointer-events:none}
+.flash.on{opacity:1}
+.overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:#e7efe9;text-align:center;padding:24px}
+.overlay .big{font:700 64px var(--num)}
+.row{display:flex;flex-wrap:wrap;gap:10px}
+button{font:inherit;border:1px solid var(--line);background:var(--surface);color:var(--ink);padding:11px 16px;border-radius:12px;cursor:pointer;min-height:44px}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;flex:1 1 140px}
+button:disabled{opacity:.45;cursor:default}
+button:focus-visible,select:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+.card h2{font-size:16px;margin:0}
+.card ol{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:4px}
+label.opt{display:flex;align-items:center;justify-content:space-between;gap:12px}
+select{font:inherit;padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:var(--surface);color:var(--ink)}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;text-align:center}
+.stats div{display:flex;flex-direction:column}
+.stats b{font:700 22px var(--num);font-variant-numeric:tabular-nums}
+.stats span{font-size:12px;color:var(--muted)}
+table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
+th{color:var(--muted);font-weight:500}
+.err{color:var(--bad)}
+.note{font-size:12px;color:var(--muted)}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>坐正啦</h1>
+    <span class="sub">写作业坐姿提醒 · 原型</span>
+  </header>
+
+  <section class="stage" id="stage">
+    <video id="video" playsinline muted></video>
+    <canvas id="canvas"></canvas>
+    <div class="flash" id="flash"></div>
+    <div class="badge" id="badge" hidden>
+      <span class="pill" id="pill">准备中</span>
+      <span class="stars">⭐ <b id="starCount">0</b></span>
+    </div>
+    <div class="tip" id="tip" hidden></div>
+    <div class="overlay" id="overlay">
+      <div id="overlayText">点下面的"开始"，允许使用摄像头</div>
+      <div class="note">画面只在这台手机上分析，不录像、不上传</div>
+    </div>
+  </section>
+
+  <div class="row">
+    <button class="primary" id="startBtn">开始</button>
+    <button id="calBtn" disabled>记住正确坐姿</button>
+    <button id="flipBtn" disabled>换摄像头</button>
+  </div>
+
+  <section class="card" id="setup">
+    <h2>摆放手机</h2>
+    <ol>
+      <li>手机竖着放在孩子<b>侧前方</b>，离人约 1 米，能拍到头和肩膀。侧面拍最准。</li>
+      <li>孩子先坐端正，点<b>"记住正确坐姿"</b>，保持 3 秒。</li>
+      <li>写作业时一直开着，最好插上充电器。</li>
+    </ol>
+  </section>
+
+  <section class="card">
+    <h2>设置</h2>
+    <label class="opt" for="level">提醒灵敏度
+      <select id="level">
+        <option value="loose">宽松</option>
+        <option value="normal" selected>标准</option>
+        <option value="strict">严格</option>
+      </select>
+    </label>
+    <label class="opt" for="hold">姿势不对多久后提醒
+      <select id="hold">
+        <option value="2">2 秒</option>
+        <option value="4" selected>4 秒</option>
+        <option value="8">8 秒</option>
+      </select>
+    </label>
+    <label class="opt" for="sound">提醒方式
+      <select id="sound">
+        <option value="voice" selected>语音 + 红框</option>
+        <option value="beep">提示音 + 红框</option>
+        <option value="silent">只显示红框</option>
+      </select>
+    </label>
+    <label class="opt" for="view">画面
+      <select id="view">
+        <option value="video" selected>显示摄像头画面</option>
+        <option value="skeleton">只显示骨架线</option>
+      </select>
+    </label>
+    <p class="note">坐得好每满 1 分钟得 1 颗星。</p>
+  </section>
+
+  <section class="card" id="summary" hidden>
+    <h2>本次报告</h2>
+    <div class="stats">
+      <div><b id="sDur">0</b><span>分钟</span></div>
+      <div><b id="sGood">0%</b><span>坐姿良好</span></div>
+      <div><b id="sAlerts">0</b><span>提醒次数</span></div>
+      <div><b id="sStars">0</b><span>星星</span></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>历史记录</h2>
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr><th>时间</th><th>时长</th><th>良好</th><th>提醒</th><th>星星</th></tr></thead>
+        <tbody id="history"><tr><td colspan="5" class="note">还没有记录。用完点"结束"就会保存在这台手机上。</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+  <p class="note">原型版本，仅作习惯提醒，不是医疗检测。</p>
+</main>
+
+<script type="module">
+import { FilesetResolver, PoseLandmarker } from "./vendor/vision_bundle.mjs";
+import { measure, smooth, evaluate } from "./posture-logic.js";
+
+const $ = (id) => document.getElementById(id);
+const video = $("video"), canvas = $("canvas"), ctx = canvas.getContext("2d");
+const stage = $("stage"), pill = $("pill"), tip = $("tip"), flash = $("flash");
+
+let landmarker = null, stream = null, facing = "user";
+let running = false, lastDetect = 0, smoothed = null, base = null;
+let badSince = null, lastAlert = 0;
+let session = null;
+let audioCtx = null, wakeLock = null;
+
+const store = {
+  get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+base = store.get("posture.base", null);
+for (const id of ["level", "hold", "sound", "view"]) {
+  const v = store.get("posture." + id, null);
+  if (v) $(id).value = v;
+  $(id).addEventListener("change", () => { store.set("posture." + id, $(id).value); applyView(); });
+}
+function applyView() { stage.classList.toggle("hide-video", $("view").value === "skeleton"); }
+applyView();
+renderHistory();
+
+async function loadModel() {
+  $("overlayText").textContent = "正在加载识别模型…";
+  const files = await FilesetResolver.forVisionTasks(new URL("./vendor/wasm", location.href).href.replace(/\/$/, ""));
+  const opts = (delegate) => ({
+    baseOptions: { modelAssetPath: "./vendor/pose_landmarker_lite.task", delegate },
+    runningMode: "VIDEO", numPoses: 1,
+  });
+  try { return await PoseLandmarker.createFromOptions(files, opts("GPU")); }
+  catch { return await PoseLandmarker.createFromOptions(files, opts("CPU")); }
+}
+
+async function startCamera() {
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: facing, width: { ideal: 640 }, height: { ideal: 480 } }, audio: false,
+  });
+  video.srcObject = stream;
+  await video.play();
+  const mirror = facing === "user";
+  video.classList.toggle("mirror", mirror);
+  canvas.classList.toggle("mirror", mirror);
+}
+
+$("startBtn").addEventListener("click", async () => {
+  if (running) return stop();
+  $("startBtn").disabled = true;
+  try {
+    audioCtx ??= new (window.AudioContext || window.webkitAudioContext)();
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia)
+      throw new Error("需要用 https 链接打开这个页面，才能使用摄像头。");
+    landmarker ??= await loadModel();
+    $("overlayText").textContent = "正在打开摄像头…";
+    await startCamera();
+    $("overlay").hidden = true;
+    $("badge").hidden = false;
+    $("calBtn").disabled = false;
+    $("flipBtn").disabled = false;
+    $("summary").hidden = true;
+    session = { start: Date.now(), good: 0, seen: 0, alerts: 0, stars: 0, goodRun: 0, last: performance.now() };
+    $("starCount").textContent = "0";
+    running = true;
+    $("startBtn").textContent = "结束";
+    try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+    if (!base) showTip('先让孩子坐端正，点"记住正确坐姿"');
+    requestAnimationFrame(loop);
+  } catch (e) {
+    $("overlayText").innerHTML = `<span class="err">${e.name === "NotAllowedError" ? "没有摄像头权限。请在浏览器设置里允许本网站使用摄像头。" : (e.message || "启动失败")}</span>`;
+  } finally {
+    $("startBtn").disabled = false;
+  }
+});
+
+$("flipBtn").addEventListener("click", async () => {
+  facing = facing === "user" ? "environment" : "user";
+  try { await startCamera(); } catch { facing = facing === "user" ? "environment" : "user"; }
+});
+
+$("calBtn").addEventListener("click", () => {
+  $("calBtn").disabled = true;
+  let n = 3;
+  const samples = [];
+  showTip(`保持端正坐姿… ${n}`);
+  const timer = setInterval(() => {
+    if (smoothed) samples.push({ ...smoothed });
+    n -= 1;
+    if (n > 0) return showTip(`保持端正坐姿… ${n}`);
+    clearInterval(timer);
+    $("calBtn").disabled = false;
+    const ok = samples.filter((s) => s.headHeight > 0);
+    if (!ok.length) return showTip("没拍到头和肩膀，调整手机位置后再试一次");
+    const avg = (k) => {
+      const vs = ok.map((s) => s[k]).filter((v) => v != null);
+      return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null;
+    };
+    base = { headHeight: avg("headHeight"), neckAngle: avg("neckAngle"), tilt: avg("tilt") };
+    store.set("posture.base", base);
+    showTip("记住了！之后会和这个坐姿比较", 2500);
+  }, 1000);
+});
+
+let tipTimer = null;
+function showTip(text, ms) {
+  tip.textContent = text; tip.hidden = false;
+  clearTimeout(tipTimer);
+  if (ms) tipTimer = setTimeout(() => (tip.hidden = true), ms);
+}
+
+function loop(now) {
+  if (!running) return;
+  requestAnimationFrame(loop);
+  if (now - lastDetect < 100 || video.readyState < 2) return; // 约每秒 10 次，减少发热
+  lastDetect = now;
+
+  const w = video.videoWidth, h = video.videoHeight;
+  if (canvas.width !== w) { canvas.width = w; canvas.height = h; }
+  const res = landmarker.detectForVideo(video, now);
+  const lm = res.landmarks?.[0];
+  const m = measure(lm, w, h);
+  smoothed = m ? smooth(smoothed, m) : null;
+  const ev = evaluate(smoothed, base, $("level").value);
+  draw(lm, ev.status);
+  update(ev, now);
+}
+
+const COLORS = () => {
+  const s = getComputedStyle(document.documentElement);
+  return { good: s.getPropertyValue("--good"), warn: s.getPropertyValue("--warn"), bad: s.getPropertyValue("--bad") };
+};
+const LINKS = [[7, 11], [8, 12], [11, 12], [11, 13], [13, 15], [12, 14], [14, 16], [11, 23], [12, 24], [23, 24], [0, 7], [0, 8]];
+function draw(lm, status) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!lm) return;
+  const c = COLORS()[status] || "#fff";
+  ctx.lineWidth = Math.max(3, canvas.width / 120);
+  ctx.strokeStyle = c; ctx.fillStyle = c;
+  const P = (i) => ({ x: lm[i].x * canvas.width, y: lm[i].y * canvas.height, v: lm[i].visibility ?? 1 });
+  for (const [a, b] of LINKS) {
+    const p = P(a), q = P(b);
+    if (p.v < 0.5 || q.v < 0.5) continue;
+    ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.stroke();
+  }
+  for (const i of [0, 7, 8, 11, 12]) {
+    const p = P(i); if (p.v < 0.5) continue;
+    ctx.beginPath(); ctx.arc(p.x, p.y, ctx.lineWidth * 1.6, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function update(ev, now) {
+  const dt = Math.min(1, (now - session.last) / 1000);
+  session.last = now;
+  const label = { good: "坐得很好", warn: "注意坐姿", bad: ev.issues[0] || "坐直一点", none: "没看到人" }[ev.status];
+  pill.textContent = label;
+  pill.className = "pill " + (ev.status === "none" ? "" : ev.status);
+
+  if (ev.status !== "none") session.seen += dt;
+  if (ev.status === "good" || ev.status === "warn") {
+    session.good += dt;
+    session.goodRun += dt;
+    if (session.goodRun >= 60) {
+      session.goodRun -= 60;
+      session.stars += 1;
+      $("starCount").textContent = session.stars;
+      showTip("坐得真好，奖励一颗星 ⭐", 2000);
+      chime(true);
+    }
+  }
+
+  if (ev.status === "bad") {
+    badSince ??= now;
+    const hold = Number($("hold").value) * 1000;
+    if (now - badSince > hold && now - lastAlert > 10000) {
+      lastAlert = now;
+      session.alerts += 1;
+      session.goodRun = 0;
+      alertKid(ev.issues[0]);
+    }
+  } else {
+    badSince = null;
+  }
+  flash.classList.toggle("on", ev.status === "bad" && badSince != null && now - badSince > Number($("hold").value) * 1000);
+}
+
+function alertKid(issue) {
+  const mode = $("sound").value;
+  navigator.vibrate?.(300);
+  if (mode === "voice" && "speechSynthesis" in window) {
+    const u = new SpeechSynthesisUtterance(issue ? `${issue}，坐直一点哦` : "坐直一点哦");
+    u.lang = "zh-CN"; u.rate = 1;
+    speechSynthesis.cancel(); speechSynthesis.speak(u);
+  } else if (mode !== "silent") {
+    chime(false);
+  }
+}
+
+function chime(happy) {
+  if (!audioCtx || $("sound").value === "silent") return;
+  const notes = happy ? [660, 880] : [440, 330];
+  notes.forEach((f, i) => {
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    const t = audioCtx.currentTime + i * 0.15;
+    o.frequency.value = f; o.connect(g); g.connect(audioCtx.destination);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.25, t + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
+    o.start(t); o.stop(t + 0.15);
+  });
+}
+
+function stop() {
+  running = false;
+  stream?.getTracks().forEach((t) => t.stop());
+  stream = null;
+  try { wakeLock?.release(); } catch {}
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  flash.classList.remove("on");
+  $("badge").hidden = true; tip.hidden = true;
+  $("overlay").hidden = false;
+  $("overlayText").textContent = "已结束。再次点\"开始\"继续";
+  $("startBtn").textContent = "开始";
+  $("calBtn").disabled = true; $("flipBtn").disabled = true;
+
+  const mins = (Date.now() - session.start) / 60000;
+  const goodPct = session.seen > 0 ? Math.round((session.good / session.seen) * 100) : 0;
+  $("sDur").textContent = mins.toFixed(mins < 10 ? 1 : 0);
+  $("sGood").textContent = goodPct + "%";
+  $("sAlerts").textContent = session.alerts;
+  $("sStars").textContent = session.stars;
+  $("summary").hidden = false;
+  if (mins >= 0.5) {
+    const hist = store.get("posture.history", []);
+    hist.unshift({ t: session.start, mins: Math.round(mins), goodPct, alerts: session.alerts, stars: session.stars });
+    store.set("posture.history", hist.slice(0, 50));
+    renderHistory();
+  }
+}
+
+function renderHistory() {
+  const hist = store.get("posture.history", []);
+  if (!hist.length) return;
+  const fmt = (t) => { const d = new Date(t); return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
+  $("history").innerHTML = hist.map((r) =>
+    `<tr><td>${fmt(r.t)}</td><td>${r.mins} 分钟</td><td>${r.goodPct}%</td><td>${r.alerts}</td><td>${r.stars}</td></tr>`).join("");
+}
+
+document.addEventListener("visibilitychange", async () => {
+  if (running && document.visibilityState === "visible") {
+    try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+  }
+});
+</script>
+</body>
+</html>
