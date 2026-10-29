@@ -67,7 +67,7 @@ th{color:var(--muted);font-weight:500}
 <main>
   <header>
     <h1>坐正啦</h1>
-    <span class="sub">写作业坐姿提醒 · 原型</span>
+    <span class="sub">写作业坐姿提醒 · 原型 <span id="ver"></span></span>
   </header>
 
   <section class="stage" id="stage">
@@ -169,7 +169,8 @@ th{color:var(--muted);font-weight:500}
 
 <script type="module">
 import { FilesetResolver, PoseLandmarker } from "./vendor/vision_bundle.mjs";
-import { measure, smooth, evaluate } from "./posture-logic.js";
+import { measure, smooth, evaluate, VERSION } from "./posture-logic.js?v=4";
+document.getElementById("ver").textContent = "v" + VERSION;
 
 const $ = (id) => document.getElementById(id);
 const video = $("video"), canvas = $("canvas"), ctx = canvas.getContext("2d");

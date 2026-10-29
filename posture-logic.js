@@ -85,6 +85,9 @@ export function smooth(prev, next, alpha = 0.3) {
   return out;
 }
 
+// 页面上显示的版本号，用来确认手机加载的是最新代码
+export const VERSION = 4;
+
 // 头转开超过这个角度就暂停判断
 export const TURN_LIMIT = 30;
 
