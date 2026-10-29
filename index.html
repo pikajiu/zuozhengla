@@ -58,6 +58,7 @@ table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:ta
 th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
 th{color:var(--muted);font-weight:500}
 .err{color:var(--bad)}
+.debug{position:absolute;left:12px;top:60px;padding:6px 10px;border-radius:10px;background:rgba(0,0,0,.6);color:#fff;font:12px/1.5 ui-monospace,Menlo,monospace;white-space:pre;pointer-events:none}
 .note{font-size:12px;color:var(--muted)}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
@@ -77,6 +78,7 @@ th{color:var(--muted);font-weight:500}
       <span class="pill" id="pill">准备中</span>
       <span class="stars">⭐ <b id="starCount">0</b></span>
     </div>
+    <div class="debug" id="debugBox" hidden></div>
     <div class="tip" id="tip" hidden></div>
     <div class="overlay" id="overlay">
       <div id="overlayText">点下面的"开始"，允许使用摄像头</div>
@@ -128,7 +130,19 @@ th{color:var(--muted);font-weight:500}
         <option value="skeleton">只显示骨架线</option>
       </select>
     </label>
-    <p class="note">坐得好每满 1 分钟得 1 颗星。</p>
+    <label class="opt" for="model">识别模型
+      <select id="model">
+        <option value="full" selected>更准（较耗电）</option>
+        <option value="lite">省电</option>
+      </select>
+    </label>
+    <label class="opt" for="debug">显示实时数值
+      <select id="debug">
+        <option value="off" selected>关</option>
+        <option value="on">开（调试用）</option>
+      </select>
+    </label>
+    <p class="note">坐得好每满 1 分钟得 1 颗星。换了手机位置要重新"记住正确坐姿"。</p>
   </section>
 
   <section class="card" id="summary" hidden>
@@ -162,7 +176,7 @@ const video = $("video"), canvas = $("canvas"), ctx = canvas.getContext("2d");
 const stage = $("stage"), pill = $("pill"), tip = $("tip"), flash = $("flash");
 
 let landmarker = null, stream = null, facing = "user";
-let running = false, lastDetect = 0, smoothed = null, base = null;
+let running = false, lastDetect = 0, smoothed = null, lastRaw = null, base = null;
 let badSince = null, lastAlert = 0;
 let session = null;
 let audioCtx = null, wakeLock = null;
@@ -171,13 +185,17 @@ const store = {
   get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
-base = store.get("posture.base", null);
-for (const id of ["level", "hold", "sound", "view"]) {
+base = store.get("posture.base.v2", null);
+for (const id of ["level", "hold", "sound", "view", "model", "debug"]) {
   const v = store.get("posture." + id, null);
   if (v) $(id).value = v;
   $(id).addEventListener("change", () => { store.set("posture." + id, $(id).value); applyView(); });
 }
-function applyView() { stage.classList.toggle("hide-video", $("view").value === "skeleton"); }
+function applyView() {
+  stage.classList.toggle("hide-video", $("view").value === "skeleton");
+  $("debugBox").hidden = !running || $("debug").value !== "on";
+}
+$("model").addEventListener("change", () => { landmarker?.close?.(); landmarker = null; if (running) stop(); });
 applyView();
 renderHistory();
 
@@ -185,7 +203,8 @@ async function loadModel() {
   $("overlayText").textContent = "正在加载识别模型…";
   const files = await FilesetResolver.forVisionTasks(new URL("./vendor/wasm", location.href).href.replace(/\/$/, ""));
   const opts = (delegate) => ({
-    baseOptions: { modelAssetPath: "./vendor/pose_landmarker_lite.task", delegate },
+    baseOptions: { modelAssetPath: `./vendor/pose_landmarker_${$("model").value === "lite" ? "lite" : "full"}.task`, delegate },
+    minPoseDetectionConfidence: 0.5, minPosePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
     runningMode: "VIDEO", numPoses: 1,
   });
   try { return await PoseLandmarker.createFromOptions(files, opts("GPU")); }
@@ -223,6 +242,7 @@ $("startBtn").addEventListener("click", async () => {
     $("starCount").textContent = "0";
     running = true;
     $("startBtn").textContent = "结束";
+    applyView();
     try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
     if (!base) showTip('先让孩子坐端正，点"记住正确坐姿"');
     requestAnimationFrame(loop);
@@ -240,25 +260,28 @@ $("flipBtn").addEventListener("click", async () => {
 
 $("calBtn").addEventListener("click", () => {
   $("calBtn").disabled = true;
-  let n = 3;
+  // 3 秒内每 0.2 秒采一次，取中位数，避免偶尔一帧识别错影响基准
+  let ticks = 0;
   const samples = [];
-  showTip(`保持端正坐姿… ${n}`);
+  showTip("保持端正坐姿… 3");
   const timer = setInterval(() => {
-    if (smoothed) samples.push({ ...smoothed });
-    n -= 1;
-    if (n > 0) return showTip(`保持端正坐姿… ${n}`);
+    if (lastRaw) samples.push({ ...lastRaw });
+    ticks += 1;
+    if (ticks % 5 === 0 && ticks < 15) showTip(`保持端正坐姿… ${3 - ticks / 5}`);
+    if (ticks < 15) return;
     clearInterval(timer);
     $("calBtn").disabled = false;
     const ok = samples.filter((s) => s.headHeight > 0);
-    if (!ok.length) return showTip("没拍到头和肩膀，调整手机位置后再试一次");
-    const avg = (k) => {
-      const vs = ok.map((s) => s[k]).filter((v) => v != null);
-      return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null;
+    if (ok.length < 8) return showTip("没拍清楚头和肩膀，调整手机位置后再试一次", 3000);
+    const median = (k) => {
+      const vs = ok.map((s) => s[k]).filter((v) => v != null).sort((a, b) => a - b);
+      return vs.length ? vs[Math.floor(vs.length / 2)] : null;
     };
-    base = { headHeight: avg("headHeight"), neckAngle: avg("neckAngle"), tilt: avg("tilt") };
-    store.set("posture.base", base);
+    base = { headHeight: median("headHeight"), neckAngle: median("neckAngle"), tilt: median("tilt"), mode: ok[0].mode };
+    store.set("posture.base.v2", base);
+    smoothed = null;
     showTip("记住了！之后会和这个坐姿比较", 2500);
-  }, 1000);
+  }, 200);
 });
 
 let tipTimer = null;
@@ -278,11 +301,25 @@ function loop(now) {
   if (canvas.width !== w) { canvas.width = w; canvas.height = h; }
   const res = landmarker.detectForVideo(video, now);
   const lm = res.landmarks?.[0];
-  const m = measure(lm, w, h);
+  const m = measure(lm, res.worldLandmarks?.[0], w, h);
+  lastRaw = m;
   smoothed = m ? smooth(smoothed, m) : null;
   const ev = evaluate(smoothed, base, $("level").value);
   draw(lm, ev.status);
   update(ev, now);
+  showDebug(smoothed, ev);
+}
+
+function showDebug(m, ev) {
+  const box = $("debugBox");
+  if (box.hidden) return;
+  const f = (v, d = 1) => (v == null ? "-" : v.toFixed(d));
+  const lines = m
+    ? [`模式 ${m.mode}`, `头高 ${f(m.headHeight, 3)}  基准 ${f(base?.headHeight, 3)}`,
+       `颈角 ${f(m.neckAngle)}°  基准 ${f(base?.neckAngle)}°`, `肩斜 ${f(m.tilt)}°  基准 ${f(base?.tilt)}°`]
+    : ["没识别到头和肩"];
+  if (ev.detail) lines.push(`下降 ${f(ev.detail.drop * 100, 0)}%  颈差 ${f(ev.detail.neck)}°  肩差 ${f(ev.detail.tilt)}°`);
+  box.textContent = lines.join("\n");
 }
 
 const COLORS = () => {
@@ -311,11 +348,11 @@ function draw(lm, status) {
 function update(ev, now) {
   const dt = Math.min(1, (now - session.last) / 1000);
   session.last = now;
-  const label = { good: "坐得很好", warn: "注意坐姿", bad: ev.issues[0] || "坐直一点", none: "没看到人" }[ev.status];
+  const label = { good: "坐得很好", warn: "注意坐姿", bad: ev.issues[0] || "坐直一点", none: "没看到头和肩膀", need_cal: "请先记住正确坐姿" }[ev.status];
   pill.textContent = label;
-  pill.className = "pill " + (ev.status === "none" ? "" : ev.status);
+  pill.className = "pill " + (["good", "warn", "bad"].includes(ev.status) ? ev.status : "");
 
-  if (ev.status !== "none") session.seen += dt;
+  if (["good", "warn", "bad"].includes(ev.status)) session.seen += dt;
   if (ev.status === "good" || ev.status === "warn") {
     session.good += dt;
     session.goodRun += dt;
@@ -376,6 +413,7 @@ function stop() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   flash.classList.remove("on");
   $("badge").hidden = true; tip.hidden = true;
+  applyView();
   $("overlay").hidden = false;
   $("overlayText").textContent = "已结束。再次点\"开始\"继续";
   $("startBtn").textContent = "开始";
