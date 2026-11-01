@@ -4,6 +4,7 @@
 
 - 在线试用：https://pikajiu.github.io/zuozhengla/
 - 姿态识别：MediaPipe Pose Landmarker（Apache-2.0），模型和运行库放在 `vendor/`，不依赖外部 CDN
+- 人脸辅助（v7）：MediaPipe Face Landmarker，只用来算头的朝向和离摄像头远近，让低头、转头判断更准，并能提醒“离太近”。不做身份识别，不保存人脸数据。设置里可以关掉
 - 坐姿判断逻辑：`posture-logic.js`
 
 原型版本，仅作习惯提醒，不是医疗检测。

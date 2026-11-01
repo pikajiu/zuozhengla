@@ -86,12 +86,33 @@ export function measure(lm, world, w = 1, h = 1) {
   return { headHeight, neckAngle, tilt, yaw, trunk, headAboveHip, mode: use3d ? "3d" : "2d" };
 }
 
+// 人脸关键点给出的头部姿态（v7）。matrix 是 FaceLandmarker 的 facialTransformationMatrixes[0]，
+// 4x4 矩阵，单位厘米，表示脸在摄像头坐标系里的位置和朝向。拍不到脸时返回空值。
+//   facePitch：脸上下转的角度（低头时和基准差得多）
+//   faceYaw：脸左右转的角度，比用耳朵和肩膀算更准
+//   faceDist：脸离摄像头多远（厘米，估算值，只用来和基准比较远近）
+export function faceMeasure(matrix) {
+  const d = matrix?.data;
+  if (!d || d.length < 16) return { facePitch: null, faceYaw: null, faceDist: null };
+  // 兼容按列或按行存放：平移量里 z 的绝对值最大
+  const colMajor = Math.abs(d[14]) >= Math.abs(d[11]);
+  const t = colMajor ? [d[12], d[13], d[14]] : [d[3], d[7], d[11]];
+  const f = colMajor ? [d[8], d[9], d[10]] : [d[2], d[6], d[10]]; // 脸的正前方
+  const faceYaw = toDeg(Math.atan2(f[0], f[2]));
+  const facePitch = toDeg(Math.atan2(f[1], Math.hypot(f[0], f[2])));
+  const faceDist = Math.hypot(t[0], t[1], t[2]);
+  if (!(faceDist > 5 && faceDist < 300)) return { facePitch: null, faceYaw: null, faceDist: null };
+  return { facePitch, faceYaw, faceDist };
+}
+
 // 平滑，减少抖动
+const FIELDS = ["headHeight", "neckAngle", "tilt", "yaw", "trunk", "headAboveHip", "facePitch", "faceYaw", "faceDist"];
+export const BASE_FIELDS = FIELDS;
 export function smooth(prev, next, alpha = 0.3) {
   if (!prev) return next;
   if (!next) return prev;
   const out = { ...next };
-  for (const k of ["headHeight", "neckAngle", "tilt", "yaw", "trunk", "headAboveHip"]) {
+  for (const k of FIELDS) {
     const a = prev[k], b = next[k];
     out[k] = a == null || b == null ? b : a + alpha * (b - a);
   }
@@ -99,16 +120,17 @@ export function smooth(prev, next, alpha = 0.3) {
 }
 
 // 页面上显示的版本号，用来确认手机加载的是最新代码
-export const VERSION = 6;
+export const VERSION = 7;
 
 // 头转开超过这个角度算"东张西望"
 export const TURN_LIMIT = 30;
 
 // 灵敏度：数值越小越严格
 export const LEVELS = {
-  loose:  { drop: 0.40, neck: 22, tilt: 14, trunk: 20, hipDrop: 0.22 },
-  normal: { drop: 0.30, neck: 16, tilt: 10, trunk: 14, hipDrop: 0.15 },
-  strict: { drop: 0.22, neck: 11, tilt: 7, trunk: 10, hipDrop: 0.10 },
+  // pitch：脸比基准多低（转）了几度；near：脸比基准离摄像头近了多少
+  loose:  { drop: 0.40, neck: 22, tilt: 14, trunk: 20, hipDrop: 0.22, pitch: 28, near: 0.35 },
+  normal: { drop: 0.30, neck: 16, tilt: 10, trunk: 14, hipDrop: 0.15, pitch: 20, near: 0.25 },
+  strict: { drop: 0.22, neck: 11, tilt: 7, trunk: 10, hipDrop: 0.10, pitch: 14, near: 0.18 },
 };
 
 // 和"正确坐姿"基准比较，给出状态和问题。没校准时只返回 need_cal，不提醒。
@@ -121,8 +143,11 @@ export function evaluate(m, base, level = "normal") {
   const issues = [];
   let warn = false;
 
-  // 头明显转向一边（东张西望、和人说话）：这时其他关键点不可靠，只报转头
-  const turn = m.yaw != null && base.yaw != null ? Math.abs(m.yaw - base.yaw) : null;
+  // 头明显转向一边（东张西望、和人说话）：这时其他关键点不可靠，只报转头。
+  // 拍得到脸时用人脸算的角度（更准），转得太开拍不到脸时退回用耳朵和肩膀算。
+  const diff = (a, b) => { let x = a - b; while (x > 180) x -= 360; while (x < -180) x += 360; return Math.abs(x); };
+  const turn = m.faceYaw != null && base.faceYaw != null ? diff(m.faceYaw, base.faceYaw)
+    : m.yaw != null && base.yaw != null ? diff(m.yaw, base.yaw) : null;
   if (turn != null && turn > TURN_LIMIT) {
     return { status: "bad", issues: ["头转开了，专心写作业"], detail: { turn } };
   }
@@ -139,6 +164,15 @@ export function evaluate(m, base, level = "normal") {
 
   if (tilt != null && tilt > t.tilt) issues.push("身子歪了，肩膀摆平");
 
+  // 人脸：低头角度和离摄像头远近。手机放在桌上，头往桌面凑时脸会靠近摄像头。
+  // 低头方向在不同摆放角度下正负号不确定，所以按和基准差多少算，不分上下。
+  const pitch = m.facePitch != null && base.facePitch != null ? diff(m.facePitch, base.facePitch) : null;
+  const near = m.faceDist != null && base.faceDist > 0 ? base.faceDist / m.faceDist - 1 : null;
+  if (pitch != null && pitch > t.pitch) { if (!issues.includes("低头太厉害了")) issues.push("低头太厉害了"); }
+  else if (pitch != null && pitch > t.pitch * 0.6) warn = true;
+  if (near != null && near > t.near) issues.unshift("离太近了，抬起头来");
+  else if (near != null && near > t.near * 0.6) warn = true;
+
   const trunk = m.trunk != null && base.trunk != null ? m.trunk - base.trunk : null;
   const hipDrop = m.headAboveHip != null && base.headAboveHip > 0 ? 1 - m.headAboveHip / base.headAboveHip : null;
   if ((trunk != null && trunk > t.trunk) || (hipDrop != null && hipDrop > t.hipDrop)) {
@@ -148,5 +182,5 @@ export function evaluate(m, base, level = "normal") {
   }
 
   const status = issues.length ? "bad" : warn ? "warn" : "good";
-  return { status, issues, detail: { drop, neck, tilt, turn, trunk, hipDrop } };
+  return { status, issues, detail: { drop, neck, tilt, turn, trunk, hipDrop, pitch, near } };
 }

@@ -141,6 +141,12 @@ textarea{width:100%;font:13px/1.5 var(--font);border:1px solid var(--line);borde
         <option value="lite">省电</option>
       </select>
     </label>
+    <label class="opt" for="face">人脸辅助判断
+      <select id="face">
+        <option value="on" selected>开（低头、转头更准，能提醒离太近）</option>
+        <option value="off">关（更省电）</option>
+      </select>
+    </label>
     <label class="opt" for="debug">显示实时数值
       <select id="debug">
         <option value="off" selected>关</option>
@@ -188,15 +194,15 @@ textarea{width:100%;font:13px/1.5 var(--font);border:1px solid var(--line);borde
 </main>
 
 <script type="module">
-import { FilesetResolver, PoseLandmarker } from "./vendor/vision_bundle.mjs";
-import { measure, smooth, evaluate, VERSION } from "./posture-logic.js?v=6";
+import { FilesetResolver, PoseLandmarker, FaceLandmarker } from "./vendor/vision_bundle.mjs";
+import { measure, faceMeasure, smooth, evaluate, VERSION, BASE_FIELDS } from "./posture-logic.js?v=7";
 document.getElementById("ver").textContent = "v" + VERSION;
 
 const $ = (id) => document.getElementById(id);
 const video = $("video"), canvas = $("canvas"), ctx = canvas.getContext("2d");
 const stage = $("stage"), pill = $("pill"), tip = $("tip"), flash = $("flash");
 
-let landmarker = null, stream = null, facing = "user";
+let landmarker = null, faceLm = null, stream = null, facing = "user";
 let running = false, lastDetect = 0, smoothed = null, lastRaw = null, base = null;
 let badSince = null, lastAlert = 0;
 let session = null;
@@ -206,8 +212,8 @@ const store = {
   get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
-base = store.get("posture.base.v4", null);
-for (const id of ["level", "hold", "sound", "view", "model", "debug"]) {
+base = store.get("posture.base.v7", null);
+for (const id of ["level", "hold", "sound", "view", "model", "face", "debug"]) {
   const v = store.get("posture." + id, null);
   if (v) $(id).value = v;
   $(id).addEventListener("change", () => { store.set("posture." + id, $(id).value); applyView(); });
@@ -217,6 +223,7 @@ function applyView() {
   $("debugBox").hidden = !running || $("debug").value !== "on";
 }
 $("model").addEventListener("change", () => { landmarker?.close?.(); landmarker = null; if (running) stop(); });
+$("face").addEventListener("change", () => { if ($("face").value === "off") { faceLm?.close?.(); faceLm = null; } else if (running) loadFace().then((f) => (faceLm = f)); });
 applyView();
 renderHistory();
 
@@ -230,6 +237,22 @@ async function loadModel() {
   });
   try { return await PoseLandmarker.createFromOptions(files, opts("GPU")); }
   catch { return await PoseLandmarker.createFromOptions(files, opts("CPU")); }
+}
+
+// 人脸关键点（v7）：只用来算头的朝向和远近，不认人，也不保存脸的图像
+let visionFiles = null;
+async function loadFace() {
+  if ($("face").value === "off") return null;
+  try {
+    visionFiles ??= await FilesetResolver.forVisionTasks(new URL("./vendor/wasm", location.href).href.replace(/\/$/, ""));
+    const opts = (delegate) => ({
+      baseOptions: { modelAssetPath: "./vendor/face_landmarker.task", delegate },
+      runningMode: "VIDEO", numFaces: 1, outputFacialTransformationMatrixes: true, outputFaceBlendshapes: false,
+      minFaceDetectionConfidence: 0.5, minFacePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
+    });
+    try { return await FaceLandmarker.createFromOptions(visionFiles, opts("GPU")); }
+    catch { return await FaceLandmarker.createFromOptions(visionFiles, opts("CPU")); }
+  } catch (e) { console.warn("人脸模型加载失败，只用身体关键点", e); return null; }
 }
 
 async function startCamera() {
@@ -252,6 +275,7 @@ $("startBtn").addEventListener("click", async () => {
     if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia)
       throw new Error("需要用 https 链接打开这个页面，才能使用摄像头。");
     landmarker ??= await loadModel();
+    if (!faceLm && $("face").value !== "off") { $("overlayText").textContent = "正在加载人脸模型…"; faceLm = await loadFace(); }
     $("overlayText").textContent = "正在打开摄像头…";
     await startCamera();
     $("overlay").hidden = true;
@@ -298,8 +322,9 @@ $("calBtn").addEventListener("click", () => {
       const vs = ok.map((s) => s[k]).filter((v) => v != null).sort((a, b) => a - b);
       return vs.length ? vs[Math.floor(vs.length / 2)] : null;
     };
-    base = { headHeight: median("headHeight"), neckAngle: median("neckAngle"), tilt: median("tilt"), yaw: median("yaw"), trunk: median("trunk"), headAboveHip: median("headAboveHip"), mode: ok[0].mode };
-    store.set("posture.base.v4", base);
+    base = { mode: ok[0].mode };
+    for (const k of BASE_FIELDS) base[k] = median(k);
+    store.set("posture.base.v7", base);
     smoothed = null;
     showTip("记住了！之后会和这个坐姿比较", 2500);
   }, 200);
@@ -323,10 +348,18 @@ function loop(now) {
   const res = landmarker.detectForVideo(video, now);
   const lm = res.landmarks?.[0];
   const m = measure(lm, res.worldLandmarks?.[0], w, h);
+  let face = null;
+  if (faceLm) {
+    try {
+      const fr = faceLm.detectForVideo(video, now + 0.5);
+      face = fr.faceLandmarks?.[0] || null;
+      if (m) Object.assign(m, faceMeasure(face ? fr.facialTransformationMatrixes?.[0] : null));
+    } catch {}
+  }
   lastRaw = m;
   smoothed = m ? smooth(smoothed, m) : null;
   const ev = evaluate(smoothed, base, $("level").value);
-  draw(lm, ev.status);
+  draw(lm, ev.status, face);
   update(ev, now);
   showDebug(smoothed, ev);
 }
@@ -337,11 +370,14 @@ function showDebug(m, ev) {
   const f = (v, d = 1) => (v == null ? "-" : v.toFixed(d));
   const lines = m
     ? [`模式 ${m.mode}`, `头高 ${f(m.headHeight, 3)}  基准 ${f(base?.headHeight, 3)}`,
-       `颈角 ${f(m.neckAngle)}°  基准 ${f(base?.neckAngle)}°`, `肩斜 ${f(m.tilt)}°  基准 ${f(base?.tilt)}°`, `转头 ${f(m.yaw)}°  基准 ${f(base?.yaw)}°`, `躯干 ${f(m.trunk)}°  基准 ${f(base?.trunk)}°`, `头离髋 ${f(m.headAboveHip, 2)}m  基准 ${f(base?.headAboveHip, 2)}m`]
+       `颈角 ${f(m.neckAngle)}°  基准 ${f(base?.neckAngle)}°`, `肩斜 ${f(m.tilt)}°  基准 ${f(base?.tilt)}°`, `转头 ${f(m.yaw)}°  基准 ${f(base?.yaw)}°`, `躯干 ${f(m.trunk)}°  基准 ${f(base?.trunk)}°`, `头离髋 ${f(m.headAboveHip, 2)}m  基准 ${f(base?.headAboveHip, 2)}m`,
+       `脸俯仰 ${f(m.facePitch)}°  基准 ${f(base?.facePitch)}°`, `脸转向 ${f(m.faceYaw)}°  基准 ${f(base?.faceYaw)}°`, `脸距 ${f(m.faceDist, 0)}cm  基准 ${f(base?.faceDist, 0)}cm`]
     : ["没识别到头和肩"];
   if (ev.detail?.drop != null) lines.push(`下降 ${f(ev.detail.drop * 100, 0)}%  颈差 ${f(ev.detail.neck)}°  肩差 ${f(ev.detail.tilt)}°`);
   if (ev.detail?.turn != null) lines.push(`转头差 ${f(ev.detail.turn)}°（超过 30° 提醒）`);
   if (ev.detail?.trunk != null) lines.push(`躯干差 ${f(ev.detail.trunk)}°  头离髋下降 ${f((ev.detail.hipDrop ?? 0) * 100, 0)}%`);
+  if (ev.detail?.pitch != null || ev.detail?.near != null) lines.push(`脸俯仰差 ${f(ev.detail.pitch)}°  靠近 ${f((ev.detail.near ?? 0) * 100, 0)}%`);
+  if (m && m.faceDist == null) lines.push(faceLm ? "没拍到脸（只用身体判断）" : "人脸辅助已关");
   box.textContent = lines.join("\n");
 }
 
@@ -350,10 +386,16 @@ const COLORS = () => {
   return { good: s.getPropertyValue("--good"), warn: s.getPropertyValue("--warn"), bad: s.getPropertyValue("--bad") };
 };
 const LINKS = [[7, 11], [8, 12], [11, 12], [11, 13], [13, 15], [12, 14], [14, 16], [11, 23], [12, 24], [23, 24], [0, 7], [0, 8]];
-function draw(lm, status) {
+function draw(lm, status, face) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  if (!lm) return;
   const c = COLORS()[status] || "#fff";
+  if (face) {
+    // 画稀疏的脸部点，让家长知道脸被识别到了
+    ctx.fillStyle = c;
+    const r = Math.max(1.5, canvas.width / 400);
+    for (let i = 0; i < face.length; i += 6) ctx.fillRect(face[i].x * canvas.width - r / 2, face[i].y * canvas.height - r / 2, r, r);
+  }
+  if (!lm) return;
   ctx.lineWidth = Math.max(3, canvas.width / 120);
   ctx.strokeStyle = c; ctx.fillStyle = c;
   const P = (i) => ({ x: lm[i].x * canvas.width, y: lm[i].y * canvas.height, v: lm[i].visibility ?? 1 });
