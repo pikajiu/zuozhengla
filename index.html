@@ -94,6 +94,10 @@ textarea{width:100%;font:13px/1.5 var(--font);border:1px solid var(--line);borde
     <button id="calBtn" disabled>记住正确坐姿</button>
     <button id="flipBtn" disabled>换摄像头</button>
   </div>
+  <div class="row" id="markRow" hidden>
+    <button id="markFalse">刚才误报</button>
+    <button id="markMiss">刚才漏报</button>
+  </div>
 
   <section class="card" id="setup">
     <h2>摆放手机</h2>
@@ -190,12 +194,21 @@ textarea{width:100%;font:13px/1.5 var(--font);border:1px solid var(--line);borde
     <textarea id="copyText" readonly hidden rows="8"></textarea>
     <p class="note" id="copyNote">复制后可以直接粘贴到微信发给我们。</p>
   </section>
+  <section class="card">
+    <h2>调试日志</h2>
+    <p class="note">开始后每秒自动记一行数据，提醒时也会记下。试用时如果没问题也提醒，或者该提醒没提醒，马上点上面的"刚才误报"或"刚才漏报"，会记下当时的数据。</p>
+    <div class="row">
+      <button id="logBtn">导出日志文件</button>
+      <button id="logClear">清空日志</button>
+    </div>
+    <p class="note" id="logNote"></p>
+  </section>
   <p class="note">原型版本，仅作习惯提醒，不是医疗检测。</p>
 </main>
 
 <script type="module">
 import { FilesetResolver, PoseLandmarker, FaceLandmarker } from "./vendor/vision_bundle.mjs";
-import { measure, faceMeasure, smooth, evaluate, VERSION, BASE_FIELDS } from "./posture-logic.js?v=7";
+import { measure, faceMeasure, smooth, evaluate, VERSION, BASE_FIELDS } from "./posture-logic.js?v=8";
 document.getElementById("ver").textContent = "v" + VERSION;
 
 const $ = (id) => document.getElementById(id);
@@ -203,6 +216,7 @@ const video = $("video"), canvas = $("canvas"), ctx = canvas.getContext("2d");
 const stage = $("stage"), pill = $("pill"), tip = $("tip"), flash = $("flash");
 
 let landmarker = null, faceLm = null, stream = null, facing = "user";
+let lastFaceT = 0, lastFace = null, lastFaceM = null;
 let running = false, lastDetect = 0, smoothed = null, lastRaw = null, base = null;
 let badSince = null, lastAlert = 0;
 let session = null;
@@ -221,12 +235,16 @@ for (const id of ["level", "hold", "sound", "view", "model", "face", "debug"]) {
 function applyView() {
   stage.classList.toggle("hide-video", $("view").value === "skeleton");
   $("debugBox").hidden = !running || $("debug").value !== "on";
+  $("markRow").hidden = !running;
 }
 $("model").addEventListener("change", () => { landmarker?.close?.(); landmarker = null; if (running) stop(); });
 $("face").addEventListener("change", () => { if ($("face").value === "off") { faceLm?.close?.(); faceLm = null; } else if (running) loadFace().then((f) => (faceLm = f)); });
 applyView();
 renderHistory();
 
+function withTimeout(p, ms) {
+  return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("加载超时")), ms))]);
+}
 async function loadModel() {
   $("overlayText").textContent = "正在加载识别模型…";
   const files = await FilesetResolver.forVisionTasks(new URL("./vendor/wasm", location.href).href.replace(/\/$/, ""));
@@ -235,8 +253,12 @@ async function loadModel() {
     minPoseDetectionConfidence: 0.5, minPosePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
     runningMode: "VIDEO", numPoses: 1,
   });
-  try { return await PoseLandmarker.createFromOptions(files, opts("GPU")); }
-  catch { return await PoseLandmarker.createFromOptions(files, opts("CPU")); }
+  try { return await withTimeout(PoseLandmarker.createFromOptions(files, opts("GPU")), 25000); }
+  catch (e) {
+    logEvent("pose_gpu_failed", String(e?.message || e));
+    $("overlayText").textContent = "正在用兼容模式加载识别模型…";
+    return await withTimeout(PoseLandmarker.createFromOptions(files, opts("CPU")), 40000);
+  }
 }
 
 // 人脸关键点（v7）：只用来算头的朝向和远近，不认人，也不保存脸的图像
@@ -250,9 +272,17 @@ async function loadFace() {
       runningMode: "VIDEO", numFaces: 1, outputFacialTransformationMatrixes: true, outputFaceBlendshapes: false,
       minFaceDetectionConfidence: 0.5, minFacePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
     });
-    try { return await FaceLandmarker.createFromOptions(visionFiles, opts("GPU")); }
-    catch { return await FaceLandmarker.createFromOptions(visionFiles, opts("CPU")); }
-  } catch (e) { console.warn("人脸模型加载失败，只用身体关键点", e); return null; }
+    // 用 CPU：部分手机上两个模型同时用 GPU 会卡住
+    const t0 = performance.now();
+    const f = await withTimeout(FaceLandmarker.createFromOptions(visionFiles, opts("CPU")), 30000);
+    logEvent("face_loaded", `${Math.round(performance.now() - t0)}ms`);
+    return f;
+  } catch (e) {
+    console.warn("人脸模型加载失败，只用身体关键点", e);
+    logEvent("face_failed", String(e?.message || e));
+    if (running) showTip("人脸模型没加载成功，先只用身体判断", 3000);
+    return null;
+  }
 }
 
 async function startCamera() {
@@ -275,7 +305,6 @@ $("startBtn").addEventListener("click", async () => {
     if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia)
       throw new Error("需要用 https 链接打开这个页面，才能使用摄像头。");
     landmarker ??= await loadModel();
-    if (!faceLm && $("face").value !== "off") { $("overlayText").textContent = "正在加载人脸模型…"; faceLm = await loadFace(); }
     $("overlayText").textContent = "正在打开摄像头…";
     await startCamera();
     $("overlay").hidden = true;
@@ -291,7 +320,11 @@ $("startBtn").addEventListener("click", async () => {
     try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
     if (!base) showTip('先让孩子坐端正，点"记住正确坐姿"');
     requestAnimationFrame(loop);
+    logEvent("start", "", { level: $("level").value, face: $("face").value, model: $("model").value, ua: navigator.userAgent });
+    // 人脸模型在后台加载，加载慢或失败都不影响身体姿态判断
+    if (!faceLm && $("face").value !== "off") loadFace().then((f) => { faceLm = f; });
   } catch (e) {
+    logEvent("error", String(e?.message || e));
     $("overlayText").innerHTML = `<span class="err">${e.name === "NotAllowedError" ? "没有摄像头权限。请在浏览器设置里允许本网站使用摄像头。" : (e.message || "启动失败")}</span>`;
   } finally {
     $("startBtn").disabled = false;
@@ -325,10 +358,73 @@ $("calBtn").addEventListener("click", () => {
     base = { mode: ok[0].mode };
     for (const k of BASE_FIELDS) base[k] = median(k);
     store.set("posture.base.v7", base);
+    logEvent("calibrate", "", base);
     smoothed = null;
     showTip("记住了！之后会和这个坐姿比较", 2500);
   }, 200);
 });
+
+// ---------- 日志：每秒记一行数据，提醒和家长标记单独记，方便事后对照 ----------
+const LOG_KEY = "posture.log", LOG_MAX = 8000;
+let logRows = store.get(LOG_KEY, []);
+let lastSample = 0, lastEv = null, logDirty = false;
+const COLS = ["headHeight", "neckAngle", "tilt", "yaw", "trunk", "headAboveHip", "facePitch", "faceYaw", "faceDist"];
+const DCOLS = ["drop", "neck", "tilt", "turn", "trunk", "hipDrop", "pitch", "near"];
+function pushLog(row) {
+  logRows.push(row);
+  if (logRows.length > LOG_MAX) logRows.splice(0, logRows.length - LOG_MAX);
+  logDirty = true;
+  updateLogNote();
+}
+setInterval(() => { if (logDirty) { store.set(LOG_KEY, logRows); logDirty = false; } }, 5000);
+addEventListener("pagehide", () => store.set(LOG_KEY, logRows));
+function logSample(type, ev, note) {
+  const m = smoothed || {};
+  pushLog({ t: Date.now(), type, status: ev?.status || "", note,
+    m: COLS.map((k) => m[k] ?? null), d: DCOLS.map((k) => ev?.detail?.[k] ?? null) });
+}
+function logEvent(type, note, extra) {
+  pushLog({ t: Date.now(), type, status: "", note: extra ? `${note} ${JSON.stringify(extra)}`.trim() : note });
+}
+function updateLogNote() {
+  const n = $("logNote");
+  if (n) n.textContent = `已记录 ${logRows.length} 行（${logRows.filter((r) => r.type === "mark_false" || r.type === "mark_miss").length} 个标记）`;
+}
+function logCsv() {
+  const pad = (n) => String(n).padStart(2, "0");
+  const ts = (t) => { const d = new Date(t); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+  const num = (v) => (v == null ? "" : Number(v).toFixed(3));
+  const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const head = ["time", "type", "status", "note", ...COLS, ...DCOLS.map((k) => "d_" + k)];
+  const lines = [`# zuozhengla v${VERSION} log`, head.join(",")];
+  for (const r of logRows) lines.push([ts(r.t), r.type, r.status, esc(r.note), ...(r.m || COLS.map(() => null)).map(num), ...(r.d || DCOLS.map(() => null)).map(num)].join(","));
+  return "\ufeff" + lines.join("\n");
+}
+function markNow(type, label) {
+  if (!running) return;
+  logSample(type, lastEv, label);
+  showTip(`已标记：${label}`, 1500);
+}
+$("markFalse").addEventListener("click", () => markNow("mark_false", "刚才误报"));
+$("markMiss").addEventListener("click", () => markNow("mark_miss", "刚才漏报"));
+$("logBtn").addEventListener("click", async () => {
+  store.set(LOG_KEY, logRows);
+  const d = new Date();
+  const name = `zuozhengla-log-${d.getMonth() + 1}${String(d.getDate()).padStart(2, "0")}-${d.getHours()}${String(d.getMinutes()).padStart(2, "0")}.csv`;
+  const file = new File([logCsv()], name, { type: "text/csv" });
+  try {
+    if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title: name }); return; }
+  } catch (e) { if (e?.name === "AbortError") return; }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(file); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+});
+$("logClear").addEventListener("click", () => {
+  if (!confirm("清空所有日志？")) return;
+  logRows = []; store.set(LOG_KEY, logRows); updateLogNote();
+});
+updateLogNote();
 
 let tipTimer = null;
 function showTip(text, ms) {
@@ -348,18 +444,23 @@ function loop(now) {
   const res = landmarker.detectForVideo(video, now);
   const lm = res.landmarks?.[0];
   const m = measure(lm, res.worldLandmarks?.[0], w, h);
-  let face = null;
-  if (faceLm) {
+  // 人脸每秒算 5 次（用 CPU，算太频繁手机会卡），中间的帧沿用上一次结果
+  if (faceLm && now - lastFaceT >= 200) {
+    lastFaceT = now;
     try {
       const fr = faceLm.detectForVideo(video, now + 0.5);
-      face = fr.faceLandmarks?.[0] || null;
-      if (m) Object.assign(m, faceMeasure(face ? fr.facialTransformationMatrixes?.[0] : null));
-    } catch {}
-  }
+      lastFace = fr.faceLandmarks?.[0] || null;
+      lastFaceM = faceMeasure(lastFace ? fr.facialTransformationMatrixes?.[0] : null);
+    } catch { lastFace = null; lastFaceM = null; }
+  } else if (!faceLm) { lastFace = null; lastFaceM = null; }
+  const face = lastFace;
+  if (m && lastFaceM) Object.assign(m, lastFaceM);
   lastRaw = m;
   smoothed = m ? smooth(smoothed, m) : null;
   const ev = evaluate(smoothed, base, $("level").value);
   draw(lm, ev.status, face);
+  lastEv = ev;
+  if (now - lastSample >= 1000) { lastSample = now; logSample("sample", ev, ""); }
   update(ev, now);
   showDebug(smoothed, ev);
 }
@@ -440,6 +541,7 @@ function update(ev, now) {
       session.byIssue[key] = (session.byIssue[key] || 0) + 1;
       session.goodRun = 0;
       alertKid(ev.issues[0]);
+      logSample("alert", ev, ev.issues.join("；"));
     }
   } else {
     badSince = null;
@@ -504,6 +606,7 @@ function chime(happy) {
 }
 
 function stop() {
+  logEvent("stop", "");
   running = false;
   stream?.getTracks().forEach((t) => t.stop());
   stream = null;
