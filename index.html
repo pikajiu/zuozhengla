@@ -201,6 +201,13 @@ textarea{width:100%;font:13px/1.5 var(--font);border:1px solid var(--line);borde
       <button id="logBtn">导出日志文件</button>
       <button id="logClear">清空日志</button>
     </div>
+    <div class="row">
+      <button class="primary" id="ghBtn">一键提交到 GitHub</button>
+    </div>
+    <label class="opt" for="ghToken">GitHub 令牌（只存在这台手机上）
+      <input id="ghToken" type="password" autocomplete="off" placeholder="github_pat_…" style="flex:1;min-width:0">
+    </label>
+    </div>
     <p class="note" id="logNote"></p>
   </section>
   <p class="note">原型版本，仅作习惯提醒，不是医疗检测。</p>
@@ -208,7 +215,7 @@ textarea{width:100%;font:13px/1.5 var(--font);border:1px solid var(--line);borde
 
 <script type="module">
 import { FilesetResolver, PoseLandmarker, FaceLandmarker } from "./vendor/vision_bundle.mjs";
-import { measure, faceMeasure, smooth, evaluate, VERSION, BASE_FIELDS } from "./posture-logic.js?v=14";
+import { measure, faceMeasure, smooth, evaluate, VERSION, BASE_FIELDS } from "./posture-logic.js?v=15";
 document.getElementById("ver").textContent = "v" + VERSION;
 
 const $ = (id) => document.getElementById(id);
@@ -465,18 +472,87 @@ function updateLogNote() {
   const n = $("logNote");
   if (n) n.textContent = `已记录 ${logRows.length} 行（${logRows.filter((r) => r.type === "mark_false" || r.type === "mark_miss").length} 个标记）`;
 }
-function logCsv() {
+function logCsv(rows = logRows, bom = true) {
   const pad = (n) => String(n).padStart(2, "0");
-  const ts = (t) => { const d = new Date(t); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+  const ts = (t) => { const d = new Date(t); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, "0")}`; };
   const num = (v) => (v == null ? "" : Number(v).toFixed(3));
   const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const head = ["time", "type", "status", "note", ...COLS, ...DCOLS.map((k) => "d_" + k)];
   const lines = [`# zuozhengla v${VERSION} log`, head.join(",")];
-  for (const r of logRows) lines.push([ts(r.t), r.type, r.status, esc(r.note), ...(r.m || COLS.map(() => null)).map(num), ...(r.d || DCOLS.map(() => null)).map(num)].join(","));
-  return "\ufeff" + lines.join("\n");
+  for (const r of rows) lines.push([ts(r.t), r.type, r.status, esc(r.note), ...(r.m || COLS.map(() => null)).map(num), ...(r.d || DCOLS.map(() => null)).map(num)].join(","));
+  return (bom ? "\ufeff" : "") + lines.join("\n");
+}
+
+// ---------- 一键提交到 GitHub Issue ----------
+// 令牌只保存在这台手机的浏览器里，不写进代码。需要只对本仓库有 Issues 读写权限的 fine-grained 令牌。
+const REPO = "pikajiu/zuozhengla";
+$("ghToken").value = store.get("posture.ghToken", "");
+$("ghToken").addEventListener("change", () => store.set("posture.ghToken", $("ghToken").value.trim()));
+function issueRows(limit) {
+  const since = store.get("posture.log.submitted", 0);
+  // 不要每秒的常规数据，只要事件、提醒、标记和标记前 5 秒的详细数据
+  let rows = logRows.filter((r) => r.t > since && r.type !== "sample");
+  // 太长时从最早的开始丢
+  while (rows.length > 1 && logCsv(rows, false).length > limit) rows = rows.slice(Math.ceil(rows.length / 10));
+  return rows;
+}
+function issueBody(rows) {
+  const marks = rows.filter((r) => r.type === "mark_false" || r.type === "mark_miss").length;
+  const alerts = rows.filter((r) => r.type === "alert").length;
+  return [
+    `版本 v${VERSION} · 灵敏度 ${$("level").value} · 人脸 ${$("face").value} · 模型 ${$("model").value}`,
+    `提醒 ${alerts} 次，标记 ${marks} 个（pre 行是标记前 5 秒的逐帧数据）`,
+    `设备：${navigator.userAgent}`,
+    "", "```csv", logCsv(rows, false), "```",
+  ].join("\n");
+}
+$("ghBtn").addEventListener("click", async () => {
+  store.set(LOG_KEY, logRows);
+  const token = $("ghToken").value.trim();
+  const d = new Date();
+  const title = `[日志] v${VERSION} ${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+  if (!token) {
+    // 没有令牌：打开预填好的新建 Issue 页面（网址长度有限，只能带一部分）
+    const rows = issueRows(5500);
+    if (!rows.length) return alert("上次提交之后还没有新的记录");
+    const url = `https://github.com/${REPO}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(issueBody(rows))}`;
+    store.set("posture.log.submitted", rows[rows.length - 1].t);
+    location.href = url;
+    return;
+  }
+  const rows = issueRows(60000);
+  if (!rows.length) return alert("上次提交之后还没有新的记录");
+  $("ghBtn").disabled = true; $("ghBtn").textContent = "正在提交…";
+  try {
+    const res = await fetch(`https://api.github.com/repos/${REPO}/issues`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "Content-Type": "application/json" },
+      body: JSON.stringify({ title, body: issueBody(rows) }),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(res.status === 401 ? "令牌无效或已过期" : res.status === 403 || res.status === 404 ? "令牌没有这个仓库的 Issues 权限" : `GitHub 返回 ${res.status} ${j.message || ""}`);
+    store.set("posture.log.submitted", rows[rows.length - 1].t);
+    $("logNote").textContent = `已提交：${j.html_url}`;
+    alert("已提交到 GitHub");
+  } catch (e) {
+    alert("提交失败：" + (e?.message || e));
+  } finally {
+    $("ghBtn").disabled = false; $("ghBtn").textContent = "一键提交到 GitHub";
+  }
+});
+// 最近 6 秒每一帧的数据（约每秒 10 帧），标记误报/漏报时把前 5 秒一起记下来
+const recent = [];
+function remember(ev) {
+  const m = smoothed || {};
+  const t = Date.now();
+  recent.push({ t, type: "pre", status: ev?.status || "", note: "",
+    m: COLS.map((k) => m[k] ?? null), d: DCOLS.map((k) => ev?.detail?.[k] ?? null) });
+  while (recent.length && t - recent[0].t > 6000) recent.shift();
 }
 function markNow(type, label) {
   if (!running) return;
+  const t = Date.now();
+  for (const r of recent) if (t - r.t <= 5000) pushLog({ ...r, note: label });
   logSample(type, lastEv, label);
   showTip(`已标记：${label}`, 1500);
 }
@@ -538,6 +614,7 @@ function loop(now) {
   const ev = evaluate(smoothed, base, $("level").value);
   draw(lm, ev.status, face);
   lastEv = ev;
+  remember(ev);
   if (now - lastSample >= 1000) { lastSample = now; logSample("sample", ev, ""); }
   update(ev, now);
   showDebug(smoothed, ev);
