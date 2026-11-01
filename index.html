@@ -520,7 +520,14 @@ async function relaySubmit() {
   try {
     const res = await fetch(RELAY_URL, { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: issueTitle(), body: issueBody(rows) }) });
-    if (!res.ok) throw new Error(res.status === 429 ? "提交太频繁，请一分钟后再试" : `服务器返回 ${res.status}`);
+    if (!res.ok) {
+      // 502 时中转会带上 GitHub 的状态码，方便看出是不是令牌的问题
+      const j = await res.json().catch(() => ({}));
+      throw new Error(res.status === 429 ? "提交太频繁，请一分钟后再试"
+        : j.error === 401 ? "中转服务里的 GitHub 令牌无效或已过期"
+        : j.error === 403 || j.error === 404 ? "中转服务里的 GitHub 令牌没有这个仓库的 Issues 权限"
+        : `服务器返回 ${res.status}${j.message ? " " + j.message : ""}`);
+    }
     store.set("posture.log.submitted", rows[rows.length - 1].t);
     $("logNote").textContent = "已上传，谢谢！";
     alert("已上传，谢谢！");
