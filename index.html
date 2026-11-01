@@ -208,7 +208,7 @@ textarea{width:100%;font:13px/1.5 var(--font);border:1px solid var(--line);borde
 
 <script type="module">
 import { FilesetResolver, PoseLandmarker, FaceLandmarker } from "./vendor/vision_bundle.mjs";
-import { measure, faceMeasure, smooth, evaluate, VERSION, BASE_FIELDS } from "./posture-logic.js?v=9";
+import { measure, faceMeasure, smooth, evaluate, VERSION, BASE_FIELDS } from "./posture-logic.js?v=10";
 document.getElementById("ver").textContent = "v" + VERSION;
 
 const $ = (id) => document.getElementById(id);
@@ -384,7 +384,9 @@ $("startBtn").addEventListener("click", async () => {
     $("startBtn").textContent = "结束";
     applyView();
     try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
-    if (!base) showTip('先让孩子坐端正，点"记住正确坐姿"');
+    // 每次开始都重新记一次坐姿：手机位置、孩子位置每次都不一样，沿用旧基准会大量误报
+    base = null; store.set("posture.base.v7", null);
+    showTip('先让孩子坐端正，点"记住正确坐姿"');
     requestAnimationFrame(loop);
     logEvent("start", "", { level: $("level").value, face: $("face").value, model: $("model").value, ua: navigator.userAgent });
     // 人脸模型在后台加载，加载慢或失败都不影响身体姿态判断
@@ -421,8 +423,14 @@ $("calBtn").addEventListener("click", () => {
       const vs = ok.map((s) => s[k]).filter((v) => v != null).sort((a, b) => a - b);
       return vs.length ? vs[Math.floor(vs.length / 2)] : null;
     };
-    base = { mode: ok[0].mode };
-    for (const k of BASE_FIELDS) base[k] = median(k);
+    const cand = { mode: ok[0].mode };
+    for (const k of BASE_FIELDS) cand[k] = median(k);
+    // 记的时候本身就弯着腰，后面全都会判错，所以拒绝
+    if ((cand.trunk != null && cand.trunk > 28) || cand.neckAngle > 35) {
+      logEvent("calibrate_rejected", "", cand);
+      return showTip("现在的坐姿不够直，请先坐端正、背挺直，再点一次", 3500);
+    }
+    base = cand;
     store.set("posture.base.v7", base);
     logEvent("calibrate", "", base);
     smoothed = null;
