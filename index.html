@@ -58,6 +58,9 @@ table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:ta
 th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
 th{color:var(--muted);font-weight:500}
 .err{color:var(--bad)}
+.rate{display:flex;flex-direction:column;gap:8px;padding-top:8px;border-top:1px solid var(--line)}
+.rate button{flex:1 1 40%;padding:8px 10px;min-height:40px;font-size:14px}
+textarea{width:100%;font:13px/1.5 var(--font);border:1px solid var(--line);border-radius:10px;padding:8px;background:var(--bg);color:var(--ink)}
 .debug{position:absolute;left:12px;top:60px;padding:6px 10px;border-radius:10px;background:rgba(0,0,0,.6);color:#fff;font:12px/1.5 ui-monospace,Menlo,monospace;white-space:pre;pointer-events:none}
 .note{font-size:12px;color:var(--muted)}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
@@ -153,23 +156,38 @@ th{color:var(--muted);font-weight:500}
       <div><b id="sAlerts">0</b><span>提醒次数</span></div>
       <div><b id="sStars">0</b><span>星星</span></div>
     </div>
+    <div class="rate" id="rateBox">
+      <span>这次的提醒准吗？（试用反馈）</span>
+      <div class="row">
+        <button data-rate="准">准</button>
+        <button data-rate="有误报">没问题也提醒</button>
+        <button data-rate="有漏报">该提醒没提醒</button>
+        <button data-rate="孩子嫌烦">孩子嫌烦</button>
+      </div>
+    </div>
+    <p class="note" id="rateDone" hidden>已记下，谢谢！</p>
   </section>
 
   <section class="card">
     <h2>历史记录</h2>
     <div style="overflow-x:auto">
       <table>
-        <thead><tr><th>时间</th><th>时长</th><th>良好</th><th>提醒</th><th>星星</th></tr></thead>
-        <tbody id="history"><tr><td colspan="5" class="note">还没有记录。用完点"结束"就会保存在这台手机上。</td></tr></tbody>
+        <thead><tr><th>时间</th><th>时长</th><th>良好</th><th>提醒</th><th>星星</th><th>反馈</th></tr></thead>
+        <tbody id="history"><tr><td colspan="6" class="note">还没有记录。用完点"结束"就会保存在这台手机上。</td></tr></tbody>
       </table>
     </div>
+    <div class="row">
+      <button id="copyBtn">复制最近 7 天报告</button>
+    </div>
+    <textarea id="copyText" readonly hidden rows="8"></textarea>
+    <p class="note" id="copyNote">复制后可以直接粘贴到微信发给我们。</p>
   </section>
   <p class="note">原型版本，仅作习惯提醒，不是医疗检测。</p>
 </main>
 
 <script type="module">
 import { FilesetResolver, PoseLandmarker } from "./vendor/vision_bundle.mjs";
-import { measure, smooth, evaluate, VERSION } from "./posture-logic.js?v=4";
+import { measure, smooth, evaluate, VERSION } from "./posture-logic.js?v=5";
 document.getElementById("ver").textContent = "v" + VERSION;
 
 const $ = (id) => document.getElementById(id);
@@ -239,7 +257,7 @@ $("startBtn").addEventListener("click", async () => {
     $("calBtn").disabled = false;
     $("flipBtn").disabled = false;
     $("summary").hidden = true;
-    session = { start: Date.now(), good: 0, seen: 0, alerts: 0, stars: 0, goodRun: 0, last: performance.now() };
+    session = { start: Date.now(), good: 0, seen: 0, alerts: 0, stars: 0, goodRun: 0, last: performance.now(), byIssue: {} };
     $("starCount").textContent = "0";
     running = true;
     $("startBtn").textContent = "结束";
@@ -373,6 +391,8 @@ function update(ev, now) {
     if (now - badSince > hold && now - lastAlert > 10000) {
       lastAlert = now;
       session.alerts += 1;
+      const key = ev.issues[0] || "其他";
+      session.byIssue[key] = (session.byIssue[key] || 0) + 1;
       session.goodRun = 0;
       alertKid(ev.issues[0]);
     }
@@ -428,9 +448,11 @@ function stop() {
   $("sAlerts").textContent = session.alerts;
   $("sStars").textContent = session.stars;
   $("summary").hidden = false;
+  $("rateBox").hidden = mins < 0.5;
+  $("rateDone").hidden = true;
   if (mins >= 0.5) {
     const hist = store.get("posture.history", []);
-    hist.unshift({ t: session.start, mins: Math.round(mins), goodPct, alerts: session.alerts, stars: session.stars });
+    hist.unshift({ t: session.start, mins: Math.round(mins), goodPct, alerts: session.alerts, stars: session.stars, byIssue: session.byIssue, rate: "" });
     store.set("posture.history", hist.slice(0, 50));
     renderHistory();
   }
@@ -441,8 +463,61 @@ function renderHistory() {
   if (!hist.length) return;
   const fmt = (t) => { const d = new Date(t); return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
   $("history").innerHTML = hist.map((r) =>
-    `<tr><td>${fmt(r.t)}</td><td>${r.mins} 分钟</td><td>${r.goodPct}%</td><td>${r.alerts}</td><td>${r.stars}</td></tr>`).join("");
+    `<tr><td>${fmt(r.t)}</td><td>${r.mins} 分钟</td><td>${r.goodPct}%</td><td>${r.alerts}</td><td>${r.stars}</td><td>${r.rate || ""}</td></tr>`).join("");
 }
+
+// 试用反馈：记在最近一次记录上
+document.querySelectorAll("[data-rate]").forEach((b) => b.addEventListener("click", () => {
+  const hist = store.get("posture.history", []);
+  if (!hist.length) return;
+  hist[0].rate = b.dataset.rate;
+  store.set("posture.history", hist);
+  renderHistory();
+  $("rateBox").hidden = true;
+  $("rateDone").hidden = false;
+}));
+
+// 最近 7 天汇总成一段文字，方便试用家庭发微信
+function weeklyReport() {
+  const since = Date.now() - 7 * 864e5;
+  const rows = store.get("posture.history", []).filter((r) => r.t >= since);
+  if (!rows.length) return "最近 7 天还没有使用记录。";
+  const sum = (k) => rows.reduce((s, r) => s + (r[k] || 0), 0);
+  const mins = sum("mins");
+  const good = Math.round(rows.reduce((s, r) => s + r.goodPct * r.mins, 0) / Math.max(1, mins));
+  const issues = {};
+  rows.forEach((r) => Object.entries(r.byIssue || {}).forEach(([k, v]) => (issues[k] = (issues[k] || 0) + v)));
+  const rates = {};
+  rows.forEach((r) => r.rate && (rates[r.rate] = (rates[r.rate] || 0) + 1));
+  const days = new Set(rows.map((r) => new Date(r.t).toDateString())).size;
+  const fmt = (t) => { const d = new Date(t); return `${d.getMonth() + 1}/${d.getDate()}`; };
+  const lines = [
+    "【坐正啦 · 最近 7 天】",
+    `使用 ${days} 天，共 ${rows.length} 次，${mins} 分钟`,
+    `坐姿良好 ${good}%，提醒 ${sum("alerts")} 次，星星 ${sum("stars")} 颗`,
+  ];
+  const iss = Object.entries(issues).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v} 次`);
+  if (iss.length) lines.push("提醒原因：" + iss.join("，"));
+  const rt = Object.entries(rates).map(([k, v]) => `${k} ${v} 次`);
+  if (rt.length) lines.push("反馈：" + rt.join("，"));
+  lines.push("明细：");
+  rows.slice().reverse().forEach((r) => lines.push(`${fmt(r.t)} ${r.mins}分钟 良好${r.goodPct}% 提醒${r.alerts}次${r.rate ? " " + r.rate : ""}`));
+  lines.push(`（v${VERSION}）`);
+  return lines.join("\n");
+}
+
+$("copyBtn").addEventListener("click", async () => {
+  const text = weeklyReport();
+  const ta = $("copyText");
+  try {
+    await navigator.clipboard.writeText(text);
+    $("copyNote").textContent = "已复制，去微信粘贴就行。";
+    ta.hidden = true;
+  } catch {
+    ta.value = text; ta.hidden = false; ta.focus(); ta.select();
+    $("copyNote").textContent = "没能自动复制，请长按上面的文字全选后复制。";
+  }
+});
 
 document.addEventListener("visibilitychange", async () => {
   if (running && document.visibilityState === "visible") {
