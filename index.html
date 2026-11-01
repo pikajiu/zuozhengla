@@ -486,6 +486,8 @@ function logCsv(rows = logRows, bom = true) {
 // ---------- 一键提交到 GitHub Issue ----------
 // 令牌只保存在这台手机的浏览器里，不写进代码。需要只对本仓库有 Issues 读写权限的 fine-grained 令牌。
 const REPO = "pikajiu/zuozhengla";
+// 中转服务地址（Cloudflare Worker 等）。填了之后所有人都能一键上传，不需要令牌。
+const RELAY_URL = "";
 $("ghToken").value = store.get("posture.ghToken", "");
 $("ghToken").addEventListener("change", () => store.set("posture.ghToken", $("ghToken").value.trim()));
 function issueRows(limit) {
@@ -506,9 +508,32 @@ function issueBody(rows) {
     "", "```csv", logCsv(rows, false), "```",
   ].join("\n");
 }
+function issueTitle() {
+  const d = new Date();
+  return `[日志] v${VERSION} ${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+async function relaySubmit() {
+  const rows = issueRows(60000);
+  if (!rows.length) return alert("上次提交之后还没有新的记录");
+  if (!confirm("将上传坐姿数据（只有角度和距离等数字，没有照片和视频），用于改进提醒的准确度。确定上传吗？")) return;
+  $("ghBtn").disabled = true; $("ghBtn").textContent = "正在提交…";
+  try {
+    const res = await fetch(RELAY_URL, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: issueTitle(), body: issueBody(rows) }) });
+    if (!res.ok) throw new Error(res.status === 429 ? "提交太频繁，请一分钟后再试" : `服务器返回 ${res.status}`);
+    store.set("posture.log.submitted", rows[rows.length - 1].t);
+    $("logNote").textContent = "已上传，谢谢！";
+    alert("已上传，谢谢！");
+  } catch (e) {
+    alert("上传失败：" + (e?.message || e) + "\n可以改用“导出日志文件”微信发送。");
+  } finally {
+    $("ghBtn").disabled = false; $("ghBtn").textContent = "一键提交到 GitHub";
+  }
+}
 $("ghBtn").addEventListener("click", async () => {
   store.set(LOG_KEY, logRows);
   const token = $("ghToken").value.trim();
+  if (RELAY_URL && !token) return relaySubmit();
   const d = new Date();
   const title = `[日志] v${VERSION} ${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
   if (!token) {
