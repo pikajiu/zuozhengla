@@ -1,0 +1,4 @@
+# Cloudflare Worker：日志中转（代码在 relay/worker.js）。和 GitHub Pages 网页无关。
+name = "zuozhengla-log"
+main = "relay/worker.js"
+compatibility_date = "2025-01-01"
