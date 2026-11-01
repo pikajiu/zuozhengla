@@ -120,7 +120,7 @@ export function smooth(prev, next, alpha = 0.3) {
 }
 
 // 页面上显示的版本号，用来确认手机加载的是最新代码
-export const VERSION = 11;
+export const VERSION = 12;
 
 // 头转开超过这个角度算"东张西望"
 export const TURN_LIMIT = 25;
@@ -150,7 +150,10 @@ export function evaluate(m, base, level = "normal") {
   const bodyTurn = m.yaw != null && base.yaw != null ? diff(m.yaw, base.yaw) : null;
   const faceAway = m.faceYaw != null && base.faceYaw != null ? Math.abs(m.faceYaw) - Math.abs(base.faceYaw) : null;
   const turn = Math.max(bodyTurn ?? -Infinity, faceAway ?? -Infinity);
-  if (turn > TURN_LIMIT) {
+  // 身体还在画面里，但脸持续拍不到（v11 日志：转头时脸先消失，身体算出的角度偏小导致漏报；
+  // 低头弯腰时脸仍能识别）。只在校准时拍到过脸的情况下才这样判断。
+  const faceGone = m.faceLost === true && base.faceYaw != null;
+  if (turn > TURN_LIMIT || faceGone) {
     return { status: "bad", issues: ["头转开了，专心写作业"], detail: { turn } };
   }
 

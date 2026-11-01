@@ -208,7 +208,7 @@ textarea{width:100%;font:13px/1.5 var(--font);border:1px solid var(--line);borde
 
 <script type="module">
 import { FilesetResolver, PoseLandmarker, FaceLandmarker } from "./vendor/vision_bundle.mjs";
-import { measure, faceMeasure, smooth, evaluate, VERSION, BASE_FIELDS } from "./posture-logic.js?v=11";
+import { measure, faceMeasure, smooth, evaluate, VERSION, BASE_FIELDS } from "./posture-logic.js?v=12";
 document.getElementById("ver").textContent = "v" + VERSION;
 
 const $ = (id) => document.getElementById(id);
@@ -216,7 +216,7 @@ const video = $("video"), canvas = $("canvas"), ctx = canvas.getContext("2d");
 const stage = $("stage"), pill = $("pill"), tip = $("tip"), flash = $("flash");
 
 let landmarker = null, faceLm = null, stream = null, facing = "user";
-let lastFaceT = 0, lastFace = null, lastFaceM = null;
+let lastFaceT = 0, lastFace = null, lastFaceM = null, faceLostSince = null;
 let running = false, lastDetect = 0, smoothed = null, lastRaw = null, base = null;
 let badSince = null, lastAlert = 0;
 let session = null;
@@ -529,6 +529,9 @@ function loop(now) {
   } else if (!faceLm) { lastFace = null; lastFaceM = null; }
   const face = lastFace;
   if (m && lastFaceM) Object.assign(m, lastFaceM);
+  // 人脸模型在工作但连续 1.5 秒没找到脸
+  if (faceLm && lastFaceM && lastFaceM.faceDist == null) faceLostSince ??= now; else faceLostSince = null;
+  if (m) m.faceLost = faceLostSince != null && now - faceLostSince > 1500;
   lastRaw = m;
   smoothed = m ? smooth(smoothed, m) : null;
   const ev = evaluate(smoothed, base, $("level").value);
