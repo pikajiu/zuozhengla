@@ -208,7 +208,7 @@ textarea{width:100%;font:13px/1.5 var(--font);border:1px solid var(--line);borde
 
 <script type="module">
 import { FilesetResolver, PoseLandmarker, FaceLandmarker } from "./vendor/vision_bundle.mjs";
-import { measure, faceMeasure, smooth, evaluate, VERSION, BASE_FIELDS } from "./posture-logic.js?v=10";
+import { measure, faceMeasure, smooth, evaluate, VERSION, BASE_FIELDS } from "./posture-logic.js?v=11";
 document.getElementById("ver").textContent = "v" + VERSION;
 
 const $ = (id) => document.getElementById(id);
@@ -549,7 +549,7 @@ function showDebug(m, ev) {
        `脸俯仰 ${f(m.facePitch)}°  基准 ${f(base?.facePitch)}°`, `脸转向 ${f(m.faceYaw)}°  基准 ${f(base?.faceYaw)}°`, `脸距 ${f(m.faceDist, 0)}cm  基准 ${f(base?.faceDist, 0)}cm`]
     : ["没识别到头和肩"];
   if (ev.detail?.drop != null) lines.push(`下降 ${f(ev.detail.drop * 100, 0)}%  颈差 ${f(ev.detail.neck)}°  肩差 ${f(ev.detail.tilt)}°`);
-  if (ev.detail?.turn != null) lines.push(`转头差 ${f(ev.detail.turn)}°（超过 30° 提醒）`);
+  if (ev.detail?.turn != null) lines.push(`转头差 ${f(ev.detail.turn)}°（超过 25° 提醒）`);
   if (ev.detail?.trunk != null) lines.push(`躯干差 ${f(ev.detail.trunk)}°  头离髋下降 ${f((ev.detail.hipDrop ?? 0) * 100, 0)}%`);
   if (ev.detail?.pitch != null || ev.detail?.near != null) lines.push(`脸俯仰差 ${f(ev.detail.pitch)}°  靠近 ${f((ev.detail.near ?? 0) * 100, 0)}%`);
   if (m && m.faceDist == null) lines.push(faceLm ? "没拍到脸（只用身体判断）" : "人脸辅助已关");

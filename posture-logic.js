@@ -120,10 +120,10 @@ export function smooth(prev, next, alpha = 0.3) {
 }
 
 // 页面上显示的版本号，用来确认手机加载的是最新代码
-export const VERSION = 10;
+export const VERSION = 11;
 
 // 头转开超过这个角度算"东张西望"
-export const TURN_LIMIT = 30;
+export const TURN_LIMIT = 25;
 
 // 灵敏度：数值越小越严格
 export const LEVELS = {
@@ -144,11 +144,13 @@ export function evaluate(m, base, level = "normal") {
   let warn = false;
 
   // 头明显转向一边（东张西望、和人说话）：这时其他关键点不可靠，只报转头。
-  // 拍得到脸时用人脸算的角度（更准），转得太开拍不到脸时退回用耳朵和肩膀算。
+  // 主要用耳朵和肩膀算。人脸角度是"脸相对手机"的朝向：孩子看一眼手机屏幕时脸会正对摄像头，
+  // 和写作业时差很多，v7~v10 因此大量误报。所以人脸只用来发现"背对手机转开"的情况。
   const diff = (a, b) => { let x = a - b; while (x > 180) x -= 360; while (x < -180) x += 360; return Math.abs(x); };
-  const turn = m.faceYaw != null && base.faceYaw != null ? diff(m.faceYaw, base.faceYaw)
-    : m.yaw != null && base.yaw != null ? diff(m.yaw, base.yaw) : null;
-  if (turn != null && turn > TURN_LIMIT) {
+  const bodyTurn = m.yaw != null && base.yaw != null ? diff(m.yaw, base.yaw) : null;
+  const faceAway = m.faceYaw != null && base.faceYaw != null ? Math.abs(m.faceYaw) - Math.abs(base.faceYaw) : null;
+  const turn = Math.max(bodyTurn ?? -Infinity, faceAway ?? -Infinity);
+  if (turn > TURN_LIMIT) {
     return { status: "bad", issues: ["头转开了，专心写作业"], detail: { turn } };
   }
 
@@ -165,8 +167,8 @@ export function evaluate(m, base, level = "normal") {
   if (tilt != null && tilt > t.tilt) issues.push("身子歪了，肩膀摆平");
 
   // 人脸：低头角度和离摄像头远近。手机放在桌上，头往桌面凑时脸会靠近摄像头。
-  // 低头方向在不同摆放角度下正负号不确定，所以按和基准差多少算，不分上下。
-  const pitch = m.facePitch != null && base.facePitch != null ? diff(m.facePitch, base.facePitch) : null;
+  // 只算往下低头（真机日志确认低头时 facePitch 变小）；抬头看手机不算。
+  const pitch = m.facePitch != null && base.facePitch != null ? base.facePitch - m.facePitch : null;
   const near = m.faceDist != null && base.faceDist > 0 ? base.faceDist / m.faceDist - 1 : null;
   if (pitch != null && pitch > t.pitch) { if (!issues.includes("低头太厉害了")) issues.push("低头太厉害了"); }
   else if (pitch != null && pitch > t.pitch * 0.6) warn = true;
@@ -182,5 +184,5 @@ export function evaluate(m, base, level = "normal") {
   }
 
   const status = issues.length ? "bad" : warn ? "warn" : "good";
-  return { status, issues, detail: { drop, neck, tilt, turn, trunk, hipDrop, pitch, near } };
+  return { status, issues, detail: { drop, neck, tilt, turn: Number.isFinite(turn) ? turn : null, trunk, hipDrop, pitch, near } };
 }
