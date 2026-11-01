@@ -120,7 +120,7 @@ export function smooth(prev, next, alpha = 0.3) {
 }
 
 // 页面上显示的版本号，用来确认手机加载的是最新代码
-export const VERSION = 8;
+export const VERSION = 9;
 
 // 头转开超过这个角度算"东张西望"
 export const TURN_LIMIT = 30;

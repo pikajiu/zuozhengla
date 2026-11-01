@@ -84,7 +84,7 @@ textarea{width:100%;font:13px/1.5 var(--font);border:1px solid var(--line);borde
     <div class="debug" id="debugBox" hidden></div>
     <div class="tip" id="tip" hidden></div>
     <div class="overlay" id="overlay">
-      <div id="overlayText">点下面的"开始"，允许使用摄像头</div>
+      <div id="overlayText" style="white-space:pre-line">点下面的"开始"，允许使用摄像头</div>
       <div class="note">画面只在这台手机上分析，不录像、不上传</div>
     </div>
   </section>
@@ -208,7 +208,7 @@ textarea{width:100%;font:13px/1.5 var(--font);border:1px solid var(--line);borde
 
 <script type="module">
 import { FilesetResolver, PoseLandmarker, FaceLandmarker } from "./vendor/vision_bundle.mjs";
-import { measure, faceMeasure, smooth, evaluate, VERSION, BASE_FIELDS } from "./posture-logic.js?v=8";
+import { measure, faceMeasure, smooth, evaluate, VERSION, BASE_FIELDS } from "./posture-logic.js?v=9";
 document.getElementById("ver").textContent = "v" + VERSION;
 
 const $ = (id) => document.getElementById(id);
@@ -245,19 +245,84 @@ renderHistory();
 function withTimeout(p, ms) {
   return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("加载超时")), ms))]);
 }
-async function loadModel() {
-  $("overlayText").textContent = "正在加载识别模型…";
+// 注册缓存：模型只在第一次打开时下载
+const swReady = (async () => {
+  if (!("serviceWorker" in navigator)) return;
+  try {
+    await navigator.serviceWorker.register("./sw.js");
+    await navigator.serviceWorker.ready;
+    if (!navigator.serviceWorker.controller)
+      await new Promise((r) => { navigator.serviceWorker.addEventListener("controllerchange", r, { once: true }); setTimeout(r, 3000); });
+  } catch (e) { logEvent("sw_failed", String(e?.message || e)); }
+})();
+
+// 带进度地下载文件。只要还在收到数据就一直等；超过 20 秒一点数据都没收到才算失败。
+async function download(urls, label) {
+  const sizes = urls.map(() => 0), got = urls.map(() => 0);
+  const t0 = performance.now();
+  const show = () => {
+    const total = sizes.reduce((a, b) => a + b, 0), done = got.reduce((a, b) => a + b, 0);
+    const mb = (v) => (v / 1048576).toFixed(1);
+    $("overlayText").textContent = total
+      ? `正在下载${label} ${Math.floor((done / total) * 100)}%（${mb(done)}/${mb(total)} MB）\n只有第一次需要下载`
+      : `正在下载${label} ${mb(done)} MB…`;
+  };
+  const bufs = await Promise.all(urls.map(async (u, i) => {
+    const ctl = new AbortController();
+    let idle = setTimeout(() => ctl.abort(), 20000);
+    try {
+      const res = await fetch(u, { signal: ctl.signal });
+      if (!res.ok) throw new Error(`下载失败 ${res.status}`);
+      sizes[i] = Number(res.headers.get("content-length")) || 0;
+      const reader = res.body.getReader(), parts = [];
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(value); got[i] += value.length;
+        clearTimeout(idle); idle = setTimeout(() => ctl.abort(), 20000);
+        show();
+      }
+      const out = new Uint8Array(got[i]); let o = 0;
+      for (const p of parts) { out.set(p, o); o += p.length; }
+      return out;
+    } catch (e) {
+      throw new Error(e?.name === "AbortError" ? "网络太慢，下载中断了" : (e?.message || String(e)));
+    } finally { clearTimeout(idle); }
+  }));
+  logEvent("download", `${label} ${(got.reduce((a, b) => a + b, 0) / 1048576).toFixed(1)}MB ${Math.round(performance.now() - t0)}ms`);
+  return bufs;
+}
+
+async function visionFileset() {
+  if (visionFiles) return visionFiles;
+  await swReady;
   const files = await FilesetResolver.forVisionTasks(new URL("./vendor/wasm", location.href).href.replace(/\/$/, ""));
+  // 先把运行库下载进缓存（带进度），之后初始化时直接从缓存读
+  await download([files.wasmLoaderPath, files.wasmBinaryPath], "运行库");
+  return (visionFiles = files);
+}
+
+async function loadModel() {
+  $("overlayText").textContent = "正在准备…";
+  const files = await visionFileset();
+  const [model] = await download([`./vendor/pose_landmarker_${$("model").value === "lite" ? "lite" : "full"}.task`], "识别模型");
+  $("overlayText").textContent = "正在启动识别…";
+  const t0 = performance.now();
   const opts = (delegate) => ({
-    baseOptions: { modelAssetPath: `./vendor/pose_landmarker_${$("model").value === "lite" ? "lite" : "full"}.task`, delegate },
+    baseOptions: { modelAssetBuffer: model, delegate },
     minPoseDetectionConfidence: 0.5, minPosePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
     runningMode: "VIDEO", numPoses: 1,
   });
-  try { return await withTimeout(PoseLandmarker.createFromOptions(files, opts("GPU")), 25000); }
-  catch (e) {
+  try {
+    const lm = await withTimeout(PoseLandmarker.createFromOptions(files, opts("GPU")), 20000);
+    logEvent("pose_loaded", `GPU ${Math.round(performance.now() - t0)}ms`);
+    return lm;
+  } catch (e) {
     logEvent("pose_gpu_failed", String(e?.message || e));
-    $("overlayText").textContent = "正在用兼容模式加载识别模型…";
-    return await withTimeout(PoseLandmarker.createFromOptions(files, opts("CPU")), 40000);
+    $("overlayText").textContent = "正在用兼容模式启动识别…";
+    const lm = await withTimeout(PoseLandmarker.createFromOptions(files, opts("CPU")), 30000);
+    logEvent("pose_loaded", `CPU ${Math.round(performance.now() - t0)}ms`);
+    return lm;
   }
 }
 
@@ -266,15 +331,16 @@ let visionFiles = null;
 async function loadFace() {
   if ($("face").value === "off") return null;
   try {
-    visionFiles ??= await FilesetResolver.forVisionTasks(new URL("./vendor/wasm", location.href).href.replace(/\/$/, ""));
+    const files = await visionFileset();
+    const [model] = await download(["./vendor/face_landmarker.task"], "人脸模型");
     const opts = (delegate) => ({
-      baseOptions: { modelAssetPath: "./vendor/face_landmarker.task", delegate },
+      baseOptions: { modelAssetBuffer: model, delegate },
       runningMode: "VIDEO", numFaces: 1, outputFacialTransformationMatrixes: true, outputFaceBlendshapes: false,
       minFaceDetectionConfidence: 0.5, minFacePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
     });
     // 用 CPU：部分手机上两个模型同时用 GPU 会卡住
     const t0 = performance.now();
-    const f = await withTimeout(FaceLandmarker.createFromOptions(visionFiles, opts("CPU")), 30000);
+    const f = await withTimeout(FaceLandmarker.createFromOptions(files, opts("CPU")), 30000);
     logEvent("face_loaded", `${Math.round(performance.now() - t0)}ms`);
     return f;
   } catch (e) {
