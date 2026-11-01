@@ -208,7 +208,7 @@ textarea{width:100%;font:13px/1.5 var(--font);border:1px solid var(--line);borde
 
 <script type="module">
 import { FilesetResolver, PoseLandmarker, FaceLandmarker } from "./vendor/vision_bundle.mjs";
-import { measure, faceMeasure, smooth, evaluate, VERSION, BASE_FIELDS } from "./posture-logic.js?v=13";
+import { measure, faceMeasure, smooth, evaluate, VERSION, BASE_FIELDS } from "./posture-logic.js?v=14";
 document.getElementById("ver").textContent = "v" + VERSION;
 
 const $ = (id) => document.getElementById(id);
@@ -263,9 +263,10 @@ async function download(urls, label) {
   const show = () => {
     const total = sizes.reduce((a, b) => a + b, 0), done = got.reduce((a, b) => a + b, 0);
     const mb = (v) => (v / 1048576).toFixed(1);
-    $("overlayText").textContent = total
+    // 服务器压缩传输时 content-length 是压缩后的大小，比实际收到的数据小，这时不显示百分比
+    $("overlayText").textContent = total && done <= total
       ? `正在下载${label} ${Math.floor((done / total) * 100)}%（${mb(done)}/${mb(total)} MB）\n只有第一次需要下载`
-      : `正在下载${label} ${mb(done)} MB…`;
+      : `正在下载${label} ${mb(done)} MB…\n只有第一次需要下载`;
   };
   const bufs = await Promise.all(urls.map(async (u, i) => {
     const ctl = new AbortController();
