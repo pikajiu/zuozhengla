@@ -120,7 +120,7 @@ export function smooth(prev, next, alpha = 0.3) {
 }
 
 // 页面上显示的版本号，用来确认手机加载的是最新代码
-export const VERSION = 12;
+export const VERSION = 13;
 
 // 头转开超过这个角度算"东张西望"
 export const TURN_LIMIT = 25;
@@ -128,9 +128,10 @@ export const TURN_LIMIT = 25;
 // 灵敏度：数值越小越严格
 export const LEVELS = {
   // pitch：脸比基准多低（转）了几度；near：脸比基准离摄像头近了多少
-  loose:  { drop: 0.40, neck: 22, tilt: 14, trunk: 20, hipDrop: 0.22, pitch: 28, near: 0.35 },
-  normal: { drop: 0.30, neck: 16, tilt: 10, trunk: 14, hipDrop: 0.15, pitch: 20, near: 0.25 },
-  strict: { drop: 0.22, neck: 11, tilt: 7, trunk: 10, hipDrop: 0.10, pitch: 14, near: 0.18 },
+  // up：脸比基准往上仰了几度（看一眼手机约 20~35°，持续仰头约 50~60°）
+  loose:  { drop: 0.40, neck: 22, tilt: 14, trunk: 20, hipDrop: 0.22, pitch: 28, near: 0.35, up: 50 },
+  normal: { drop: 0.30, neck: 16, tilt: 10, trunk: 14, hipDrop: 0.15, pitch: 20, near: 0.25, up: 40 },
+  strict: { drop: 0.22, neck: 11, tilt: 7, trunk: 10, hipDrop: 0.10, pitch: 14, near: 0.18, up: 32 },
 };
 
 // 和"正确坐姿"基准比较，给出状态和问题。没校准时只返回 need_cal，不提醒。
@@ -175,6 +176,8 @@ export function evaluate(m, base, level = "normal") {
   const near = m.faceDist != null && base.faceDist > 0 ? base.faceDist / m.faceDist - 1 : null;
   if (pitch != null && pitch > t.pitch) { if (!issues.includes("低头太厉害了")) issues.push("低头太厉害了"); }
   else if (pitch != null && pitch > t.pitch * 0.6) warn = true;
+  // 仰头（v12 日志：仰头时脸往上转了 50~60°，之前只算低头所以漏报）
+  if (pitch != null && -pitch > t.up) issues.push("仰头了，看着作业本");
   if (near != null && near > t.near) issues.unshift("离太近了，抬起头来");
   else if (near != null && near > t.near * 0.6) warn = true;
 
