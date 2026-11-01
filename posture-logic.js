@@ -4,7 +4,7 @@
 // 优先用 worldLandmarks（以米为单位的 3D 坐标），这样手机放正面、侧面还是斜前方，
 // 算出来的角度都差不多，也不受人离手机远近影响。没有 3D 坐标时才退回到 2D 画面坐标。
 
-const NOSE = 0, L_EAR = 7, R_EAR = 8, L_SH = 11, R_SH = 12;
+const NOSE = 0, L_EAR = 7, R_EAR = 8, L_SH = 11, R_SH = 12, L_HIP = 23, R_HIP = 24;
 const HEAD = [NOSE, L_EAR, R_EAR];
 const MIN_VIS = 0.35;
 
@@ -31,6 +31,8 @@ function visible(lm) {
 //   headHeight：头比肩高多少（3D 时单位是米），越小说明头越低
 //   neckAngle：肩中点→头中点 这条线偏离竖直方向多少度（低头、探脖子、侧歪都会变大）
 //   tilt：两肩连线偏离水平多少度
+//   trunk：髋→肩 这条线偏离竖直方向多少度（弯腰、驼背时变大，只有 3D 能算）
+//   headAboveHip：头比髋部高多少米（弯腰趴桌时明显变小，只有 3D 能算）
 export function measure(lm, world, w = 1, h = 1) {
   if (!lm || lm.length < 13 || !visible(lm)) return null;
 
@@ -70,7 +72,18 @@ export function measure(lm, world, w = 1, h = 1) {
     tilt = toDeg(Math.atan2(Math.abs(dy), horiz || 1e-6));
   }
 
-  return { headHeight, neckAngle, tilt, yaw, mode: use3d ? "3d" : "2d" };
+  // 弯腰：头和肩一起往前倒时，头相对肩的角度几乎不变，所以要看躯干和髋部。
+  // 3D 坐标以两髋中点为原点，即使髋部被桌子挡住，模型也会估计出来。
+  let trunk = null, headAboveHip = null;
+  if (use3d) {
+    const hip = avg([P(L_HIP), P(R_HIP)]);
+    const tx = shoulder.x - hip.x, ty = shoulder.y - hip.y, tz = shoulder.z - hip.z;
+    const tl = Math.hypot(tx, ty, tz) || 1;
+    trunk = toDeg(Math.acos(Math.max(-1, Math.min(1, -ty / tl))));
+    headAboveHip = hip.y - head.y;
+  }
+
+  return { headHeight, neckAngle, tilt, yaw, trunk, headAboveHip, mode: use3d ? "3d" : "2d" };
 }
 
 // 平滑，减少抖动
@@ -78,7 +91,7 @@ export function smooth(prev, next, alpha = 0.3) {
   if (!prev) return next;
   if (!next) return prev;
   const out = { ...next };
-  for (const k of ["headHeight", "neckAngle", "tilt", "yaw"]) {
+  for (const k of ["headHeight", "neckAngle", "tilt", "yaw", "trunk", "headAboveHip"]) {
     const a = prev[k], b = next[k];
     out[k] = a == null || b == null ? b : a + alpha * (b - a);
   }
@@ -86,16 +99,16 @@ export function smooth(prev, next, alpha = 0.3) {
 }
 
 // 页面上显示的版本号，用来确认手机加载的是最新代码
-export const VERSION = 5;
+export const VERSION = 6;
 
-// 头转开超过这个角度就暂停判断
+// 头转开超过这个角度算"东张西望"
 export const TURN_LIMIT = 30;
 
 // 灵敏度：数值越小越严格
 export const LEVELS = {
-  loose:  { drop: 0.40, neck: 22, tilt: 14 },
-  normal: { drop: 0.30, neck: 16, tilt: 10 },
-  strict: { drop: 0.22, neck: 11, tilt: 7 },
+  loose:  { drop: 0.40, neck: 22, tilt: 14, trunk: 20, hipDrop: 0.22 },
+  normal: { drop: 0.30, neck: 16, tilt: 10, trunk: 14, hipDrop: 0.15 },
+  strict: { drop: 0.22, neck: 11, tilt: 7, trunk: 10, hipDrop: 0.10 },
 };
 
 // 和"正确坐姿"基准比较，给出状态和问题。没校准时只返回 need_cal，不提醒。
@@ -108,10 +121,10 @@ export function evaluate(m, base, level = "normal") {
   const issues = [];
   let warn = false;
 
-  // 头明显转向一边时（看旁边、和人说话），关键点估计不可靠，这段时间不判断坐姿
+  // 头明显转向一边（东张西望、和人说话）：这时其他关键点不可靠，只报转头
   const turn = m.yaw != null && base.yaw != null ? Math.abs(m.yaw - base.yaw) : null;
   if (turn != null && turn > TURN_LIMIT) {
-    return { status: "turned", issues: [], detail: { turn } };
+    return { status: "bad", issues: ["头转开了，专心写作业"], detail: { turn } };
   }
 
   const drop = 1 - m.headHeight / base.headHeight;
@@ -126,6 +139,14 @@ export function evaluate(m, base, level = "normal") {
 
   if (tilt != null && tilt > t.tilt) issues.push("身子歪了，肩膀摆平");
 
+  const trunk = m.trunk != null && base.trunk != null ? m.trunk - base.trunk : null;
+  const hipDrop = m.headAboveHip != null && base.headAboveHip > 0 ? 1 - m.headAboveHip / base.headAboveHip : null;
+  if ((trunk != null && trunk > t.trunk) || (hipDrop != null && hipDrop > t.hipDrop)) {
+    issues.unshift("弯腰了，把背挺直");
+  } else if ((trunk != null && trunk > t.trunk * 0.6) || (hipDrop != null && hipDrop > t.hipDrop * 0.6)) {
+    warn = true;
+  }
+
   const status = issues.length ? "bad" : warn ? "warn" : "good";
-  return { status, issues, detail: { drop, neck, tilt, turn } };
+  return { status, issues, detail: { drop, neck, tilt, turn, trunk, hipDrop } };
 }

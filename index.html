@@ -127,6 +127,8 @@ textarea{width:100%;font:13px/1.5 var(--font);border:1px solid var(--line);borde
         <option value="silent">只显示红框</option>
       </select>
     </label>
+    <div class="row"><button id="testSound">试听提醒</button></div>
+    <p class="note" id="testNote">先点这里确认手机能发出提醒声音。</p>
     <label class="opt" for="view">画面
       <select id="view">
         <option value="video" selected>显示摄像头画面</option>
@@ -187,7 +189,7 @@ textarea{width:100%;font:13px/1.5 var(--font);border:1px solid var(--line);borde
 
 <script type="module">
 import { FilesetResolver, PoseLandmarker } from "./vendor/vision_bundle.mjs";
-import { measure, smooth, evaluate, VERSION } from "./posture-logic.js?v=5";
+import { measure, smooth, evaluate, VERSION } from "./posture-logic.js?v=6";
 document.getElementById("ver").textContent = "v" + VERSION;
 
 const $ = (id) => document.getElementById(id);
@@ -204,7 +206,7 @@ const store = {
   get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
-base = store.get("posture.base.v3", null);
+base = store.get("posture.base.v4", null);
 for (const id of ["level", "hold", "sound", "view", "model", "debug"]) {
   const v = store.get("posture." + id, null);
   if (v) $(id).value = v;
@@ -246,7 +248,7 @@ $("startBtn").addEventListener("click", async () => {
   if (running) return stop();
   $("startBtn").disabled = true;
   try {
-    audioCtx ??= new (window.AudioContext || window.webkitAudioContext)();
+    unlockAudio();
     if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia)
       throw new Error("需要用 https 链接打开这个页面，才能使用摄像头。");
     landmarker ??= await loadModel();
@@ -296,8 +298,8 @@ $("calBtn").addEventListener("click", () => {
       const vs = ok.map((s) => s[k]).filter((v) => v != null).sort((a, b) => a - b);
       return vs.length ? vs[Math.floor(vs.length / 2)] : null;
     };
-    base = { headHeight: median("headHeight"), neckAngle: median("neckAngle"), tilt: median("tilt"), yaw: median("yaw"), mode: ok[0].mode };
-    store.set("posture.base.v3", base);
+    base = { headHeight: median("headHeight"), neckAngle: median("neckAngle"), tilt: median("tilt"), yaw: median("yaw"), trunk: median("trunk"), headAboveHip: median("headAboveHip"), mode: ok[0].mode };
+    store.set("posture.base.v4", base);
     smoothed = null;
     showTip("记住了！之后会和这个坐姿比较", 2500);
   }, 200);
@@ -335,10 +337,11 @@ function showDebug(m, ev) {
   const f = (v, d = 1) => (v == null ? "-" : v.toFixed(d));
   const lines = m
     ? [`模式 ${m.mode}`, `头高 ${f(m.headHeight, 3)}  基准 ${f(base?.headHeight, 3)}`,
-       `颈角 ${f(m.neckAngle)}°  基准 ${f(base?.neckAngle)}°`, `肩斜 ${f(m.tilt)}°  基准 ${f(base?.tilt)}°`, `转头 ${f(m.yaw)}°  基准 ${f(base?.yaw)}°`]
+       `颈角 ${f(m.neckAngle)}°  基准 ${f(base?.neckAngle)}°`, `肩斜 ${f(m.tilt)}°  基准 ${f(base?.tilt)}°`, `转头 ${f(m.yaw)}°  基准 ${f(base?.yaw)}°`, `躯干 ${f(m.trunk)}°  基准 ${f(base?.trunk)}°`, `头离髋 ${f(m.headAboveHip, 2)}m  基准 ${f(base?.headAboveHip, 2)}m`]
     : ["没识别到头和肩"];
   if (ev.detail?.drop != null) lines.push(`下降 ${f(ev.detail.drop * 100, 0)}%  颈差 ${f(ev.detail.neck)}°  肩差 ${f(ev.detail.tilt)}°`);
-  if (ev.detail?.turn != null) lines.push(`转头差 ${f(ev.detail.turn)}°（超过 30° 暂停判断）`);
+  if (ev.detail?.turn != null) lines.push(`转头差 ${f(ev.detail.turn)}°（超过 30° 提醒）`);
+  if (ev.detail?.trunk != null) lines.push(`躯干差 ${f(ev.detail.trunk)}°  头离髋下降 ${f((ev.detail.hipDrop ?? 0) * 100, 0)}%`);
   box.textContent = lines.join("\n");
 }
 
@@ -368,7 +371,7 @@ function draw(lm, status) {
 function update(ev, now) {
   const dt = Math.min(1, (now - session.last) / 1000);
   session.last = now;
-  const label = { good: "坐得很好", warn: "注意坐姿", bad: ev.issues[0] || "坐直一点", none: "没看到头和肩膀", need_cal: "请先记住正确坐姿", turned: "头转开了，暂不判断" }[ev.status];
+  const label = { good: "坐得很好", warn: "注意坐姿", bad: ev.issues[0] || "坐直一点", none: "没看到头和肩膀", need_cal: "请先记住正确坐姿", turned: "头转开了" }[ev.status];
   pill.textContent = label;
   pill.className = "pill " + (["good", "warn", "bad"].includes(ev.status) ? ev.status : "");
 
@@ -402,17 +405,48 @@ function update(ev, now) {
   flash.classList.toggle("on", ev.status === "bad" && badSince != null && now - badSince > Number($("hold").value) * 1000);
 }
 
+// 手机浏览器（尤其 iPhone）要求声音和语音第一次必须在用户点按时触发，之后才能自动播放
+function unlockAudio() {
+  try {
+    audioCtx ??= new (window.AudioContext || window.webkitAudioContext)();
+    audioCtx.resume?.();
+  } catch {}
+  if ("speechSynthesis" in window && $("sound").value === "voice") {
+    say("开始啦");
+  }
+}
+
+function zhVoice() {
+  const vs = speechSynthesis.getVoices();
+  return vs.find((v) => /zh[-_]CN/i.test(v.lang)) || vs.find((v) => /^zh/i.test(v.lang)) || null;
+}
+
+function say(text) {
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "zh-CN"; u.rate = 1; u.volume = 1;
+    const v = zhVoice(); if (v) u.voice = v;
+    speechSynthesis.cancel(); speechSynthesis.resume?.(); speechSynthesis.speak(u);
+  } catch {}
+}
+
 function alertKid(issue) {
   const mode = $("sound").value;
   navigator.vibrate?.(300);
+  if (mode === "silent") return;
+  chime(false); // 先响提示音，保证没有中文语音的手机也有声音
   if (mode === "voice" && "speechSynthesis" in window) {
-    const u = new SpeechSynthesisUtterance(issue ? `${issue}，坐直一点哦` : "坐直一点哦");
-    u.lang = "zh-CN"; u.rate = 1;
-    speechSynthesis.cancel(); speechSynthesis.speak(u);
-  } else if (mode !== "silent") {
-    chime(false);
+    setTimeout(() => say(issue ? `${issue}` : "坐直一点哦"), 350);
   }
 }
+
+$("testSound").addEventListener("click", () => {
+  unlockAudio();
+  setTimeout(() => alertKid("坐直一点哦"), 600);
+  const ok = !("speechSynthesis" in window) ? "这台手机的浏览器不支持语音，只会有提示音。" :
+    zhVoice() ? "应该能听到提示音和中文语音。" : "没找到中文语音包，可能只有提示音。";
+  $("testNote").textContent = ok + " 听不到请检查静音开关和媒体音量。";
+});
 
 function chime(happy) {
   if (!audioCtx || $("sound").value === "silent") return;
